@@ -3,6 +3,7 @@ const { chromium } = require('playwright-chromium')
 let browser = null
 let page = null
 let sessionExpiry = 0
+let isNewInterface = false
 
 const BASE = 'https://dbo.centrinvest.ru/sbns-web'
 const LOGIN_URL = `${BASE}/ru/html/login.html`
@@ -29,7 +30,10 @@ async function ensureLoggedIn(username, password) {
   const now = Date.now()
   if (page && now < sessionExpiry) {
     try {
-      await page.goto(MAIN_URL, { timeout: 12000, waitUntil: 'domcontentloaded' })
+      const checkUrl = isNewInterface
+        ? 'https://dbo.centrinvest.ru/api-ui/'
+        : MAIN_URL
+      await page.goto(checkUrl, { timeout: 12000, waitUntil: 'domcontentloaded' })
       if (!page.url().toString().includes('login.html')) {
         return page
       }
@@ -58,12 +62,8 @@ async function ensureLoggedIn(username, password) {
   await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 20000 })
   await page.waitForTimeout(2000)
 
-  // New interface (/api-ui/) — switch back to old ZK interface
-  if (page.url().includes('/api-ui')) {
-    console.log('[browser] New interface detected, switching to classic ZK...')
-    await page.goto(MAIN_URL, { waitUntil: 'domcontentloaded', timeout: 20000 })
-    await page.waitForTimeout(2000)
-  }
+  isNewInterface = page.url().includes('/api-ui')
+  console.log('[browser] Interface:', isNewInterface ? 'NEW (/api-ui/)' : 'CLASSIC (ZK)')
 
   sessionExpiry = Date.now() + 20 * 60 * 1000
   console.log('[browser] Logged in, URL:', page.url())
@@ -73,7 +73,89 @@ async function ensureLoggedIn(username, password) {
 async function getAccountsData(username, password) {
   const p = await ensureLoggedIn(username, password)
 
-  // Click СЧЕТА menu to ensure accounts section is active
+  if (isNewInterface) {
+    return getAccountsNewInterface(p)
+  } else {
+    return getAccountsClassicInterface(p)
+  }
+}
+
+async function getAccountsNewInterface(p) {
+  console.log('[browser] Using new interface to get accounts')
+
+  // Click "Счета и платежи" in the sidebar
+  try {
+    await p.click('text=Счета и платежи', { timeout: 5000 })
+    console.log('[browser] Clicked Счета и платежи')
+    await p.waitForTimeout(3000)
+  } catch (e) {
+    console.log('[browser] Could not click menu:', e.message)
+  }
+
+  // Poll for account numbers (dotted format or plain 20-digit)
+  let accounts = []
+  for (let attempt = 0; attempt < 8; attempt++) {
+    await p.waitForTimeout(2500)
+
+    const result = await p.evaluate(() => {
+      const results = []
+      const seen = new Set()
+
+      // Look for all text nodes / elements that could contain account numbers
+      document.querySelectorAll('*').forEach(el => {
+        if (el.children.length > 3) return // skip containers
+        const text = el.textContent.trim()
+        const stripped = text.replace(/[\.\s]/g, '')
+        if (stripped.match(/^\d{20}$/) && !seen.has(stripped)) {
+          seen.add(stripped)
+          // Try to get balance from nearby elements
+          const parent = el.closest('[class]') || el.parentElement
+          const parentText = parent ? parent.innerText : ''
+          results.push({ number: stripped, raw: text, context: parentText.substring(0, 200) })
+        }
+      })
+
+      // Also look in full text for dotted account pattern
+      const bodyText = document.body.innerText
+      const dotPattern = /\b(\d{5})\.(\d{3})\.(\d)\.(\d{11})\b/g
+      let m
+      while ((m = dotPattern.exec(bodyText)) !== null) {
+        const num = m[1] + m[2] + m[3] + m[4]
+        if (!seen.has(num)) {
+          seen.add(num)
+          results.push({ number: num, raw: m[0], context: bodyText.substring(Math.max(0, m.index - 100), m.index + 200) })
+        }
+      }
+
+      return results
+    })
+
+    if (result.length > 0) {
+      accounts = result
+      break
+    }
+    console.log(`[browser] Attempt ${attempt + 1}: no accounts yet`)
+  }
+
+  if (accounts.length === 0) {
+    const bodyText = await p.evaluate(() => document.body.innerText)
+    console.log('[browser] Page text (first 800):', bodyText.substring(0, 800))
+  }
+
+  console.log('[browser] Found accounts:', accounts.length, accounts.map(a => a.number))
+
+  return accounts.map(a => {
+    const balMatch = a.context.match(/(\d[\d\s]*[,\.]\d{2})\s*[₽$€]/)
+    const balance = balMatch ? parseFloat(balMatch[1].replace(/\s/g, '').replace(',', '.')) : 0
+    const currency = a.context.includes('USD') ? 'USD' : a.context.includes('EUR') ? 'EUR' : 'RUR'
+    const status = a.context.match(/Открыт|Закрыт|Заблокирован/)?.[0] || 'Открыт'
+    return { number: a.number, currency, balance, status }
+  })
+}
+
+async function getAccountsClassicInterface(p) {
+  console.log('[browser] Using classic ZK interface to get accounts')
+
   try {
     await p.click('text=СЧЕТА', { timeout: 5000 })
     console.log('[browser] Clicked СЧЕТА menu')
@@ -81,8 +163,6 @@ async function getAccountsData(username, password) {
     console.log('[browser] Could not click СЧЕТА:', e.message)
   }
 
-  // Wait for a row with a 20-digit number to appear (poll up to 20s)
-  console.log('[browser] Waiting for account rows...')
   let accounts = []
   for (let attempt = 0; attempt < 8; attempt++) {
     await p.waitForTimeout(2500)
@@ -92,7 +172,6 @@ async function getAccountsData(username, password) {
       const seen = new Set()
       document.querySelectorAll('td, span, div').forEach(el => {
         const text = el.textContent.trim()
-        // Match 20-digit account numbers, possibly formatted with dots (e.g. 40802.810.3.09500000228)
         const stripped = text.replace(/\./g, '')
         if (stripped.match(/^\d{20}$/) && !seen.has(stripped)) {
           seen.add(stripped)
@@ -114,7 +193,6 @@ async function getAccountsData(username, password) {
     console.log(`[browser] Attempt ${attempt + 1}: no accounts yet`)
   }
 
-  // Debug: log page text if still empty
   if (accounts.length === 0) {
     const bodyText = await p.evaluate(() => document.body.innerText)
     console.log('[browser] Page text (first 600):', bodyText.substring(0, 600))
@@ -135,7 +213,8 @@ async function getPaymentsData(username, password) {
   const p = await ensureLoggedIn(username, password)
 
   try {
-    await p.click('text=ПЛАТЕЖНЫЕ ДОКУМЕНТЫ', { timeout: 5000 })
+    const menuText = isNewInterface ? 'Мои документы' : 'ПЛАТЕЖНЫЕ ДОКУМЕНТЫ'
+    await p.click(`text=${menuText}`, { timeout: 5000 })
     await p.waitForTimeout(3000)
   } catch {}
 
@@ -159,25 +238,9 @@ async function getPaymentsData(username, password) {
   return payments
 }
 
-async function closeBrowser() {
-  if (browser) {
-    await browser.close()
-    browser = null
-    page = null
-    sessionExpiry = 0
-  }
-}
-
 async function getWhoAmI(username, password) {
   const p = await ensureLoggedIn(username, password)
   const name = await p.evaluate(() => {
-    // ZK renders the user name in the top area
-    const selectors = ['.z-identity', '.user-name', 'span.name', 'div.user']
-    for (const sel of selectors) {
-      const el = document.querySelector(sel)
-      if (el?.textContent?.trim()) return el.textContent.trim()
-    }
-    // Fallback: find the name-looking text near the top (all-caps Cyrillic, 3 words)
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
     let node
     while ((node = walker.nextNode())) {
@@ -189,6 +252,16 @@ async function getWhoAmI(username, password) {
     return null
   })
   return name
+}
+
+async function closeBrowser() {
+  if (browser) {
+    await browser.close()
+    browser = null
+    page = null
+    sessionExpiry = 0
+    isNewInterface = false
+  }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getWhoAmI, closeBrowser }
