@@ -202,7 +202,7 @@ async function getPaymentsData(username, password) {
 }
 
 async function getPaymentsViaResponseListener(p) {
-  console.log('[browser] Navigating to collect payment/transaction responses...')
+  console.log('[browser] Collecting payment data, current URL:', p.url())
   const apiData = []
 
   const onResponse = async (response) => {
@@ -213,9 +213,9 @@ async function getPaymentsViaResponseListener(p) {
       const ct = response.headers()['content-type'] || ''
       if (!ct.includes('json')) return
       const body = await response.text()
-      if (body.length > 50) {
+      if (body.length > 10) {
         console.log('[api tx]', response.request().method(), url.replace('https://dbo.centrinvest.ru', ''), body.length + 'b')
-        if (body.length < 3000) console.log('[api tx] body:', body.substring(0, 600))
+        if (body.length < 5000) console.log('[api tx] body:', body.substring(0, 800))
         apiData.push({ url, body })
       }
     } catch {}
@@ -223,78 +223,128 @@ async function getPaymentsViaResponseListener(p) {
 
   p.on('response', onResponse)
 
-  // Re-navigate through the accounts/statements section to trigger transaction APIs
-  const navSequences = [
-    // Typical "Accounts & Payments" → sub-sections
-    ['text=Счета и платежи', 'text=Выписка'],
-    ['text=Счета и платежи', 'text=История операций'],
-    ['text=Счета и платежи', 'text=Платежи'],
-    ['text=Счета и платежи', 'text=Исходящие'],
-    // Top-level navigation
-    ['text=Платежи'],
-    ['text=История'],
-    ['text=Исходящие платежи'],
-  ]
-  for (const seq of navSequences) {
-    for (const t of seq) {
-      try { await p.click(t, { timeout: 3000 }); await p.waitForTimeout(1500) } catch {}
+  // Step 1: log all clickable nav elements so we can see the real structure in logs
+  const navLinks = await p.evaluate(() => {
+    const out = []
+    document.querySelectorAll('a, button, [role="menuitem"], [role="tab"], [role="button"]').forEach(el => {
+      const t = (el.textContent || '').trim().replace(/\s+/g, ' ')
+      const href = el.getAttribute('href') || ''
+      if (t.length > 1 && t.length < 60) out.push({ text: t, href })
+    })
+    return out.slice(0, 60)
+  })
+  console.log('[browser] Nav items found:', JSON.stringify(navLinks))
+
+  // Step 2: navigate same path that works for accounts
+  try { await p.click('text=Счета и платежи', { timeout: 4000 }); await p.waitForTimeout(2500) } catch {}
+  try { await p.click('text=Выписка', { timeout: 3000 }); await p.waitForTimeout(3000) } catch {}
+
+  // Step 3: click on the first listed account to load its transactions
+  const firstAccountClicked = await p.evaluate(() => {
+    const rows = document.querySelectorAll('tr, [class*="account-row"], [class*="AccountRow"], [class*="list-item"]')
+    for (const row of rows) {
+      const t = row.textContent || ''
+      if (t.match(/\d{20}|\d{5}\.\d{3}/)) {
+        row.click()
+        return (row.textContent || '').trim().substring(0, 80)
+      }
     }
-    await p.waitForTimeout(1000)
+    return null
+  })
+  if (firstAccountClicked) {
+    console.log('[browser] Clicked account row:', firstAccountClicked)
+    await p.waitForTimeout(3000)
+  }
+
+  // Step 4: try payment-keyword nav items
+  const payKeywords = ['Платеж', 'платеж', 'Документ', 'История', 'Операци', 'Исходящи', 'Входящи', 'Перевод', 'Транзакци']
+  for (const { text } of navLinks) {
+    if (payKeywords.some(kw => text.includes(kw))) {
+      try {
+        console.log('[browser] Clicking:', text)
+        await p.click(`text="${text}"`, { timeout: 2000 })
+        await p.waitForTimeout(2500)
+      } catch {}
+    }
+  }
+
+  // Step 5: try direct REST API calls from page context (uses browser session/cookies)
+  const origin = 'https://dbo.centrinvest.ru'
+  const basePath = p.url().includes('/api-ui') ? '/api-ui' : '/sbns-web'
+  const tryPaths = [
+    '/api/v1/payments', '/api/v1/transactions', '/api/v1/documents',
+    '/api/v1/history', '/api/v1/operations', '/api/v1/statements',
+    '/api/payments', '/api/documents', '/api/transactions', '/api/operations',
+    '/rest/v1/payments', '/rest/v1/transactions',
+  ]
+  for (const path of tryPaths) {
+    try {
+      const result = await p.evaluate(async ({ origin, path }) => {
+        const r = await fetch(origin + path, { credentials: 'include' })
+        if (!r.ok) return null
+        const ct = r.headers.get('content-type') || ''
+        if (!ct.includes('json')) return null
+        const text = await r.text()
+        return { url: origin + path, body: text }
+      }, { origin, path })
+      if (result && result.body.length > 10) {
+        console.log('[browser] Direct API:', path, result.body.length + 'b', result.body.substring(0, 400))
+        apiData.push(result)
+      }
+    } catch {}
   }
 
   p.off('response', onResponse)
-  console.log('[browser] Captured', apiData.length, 'payment API responses')
+  console.log('[browser] Total tx API responses captured:', apiData.length)
 
   const payments = []
   const seen = new Set()
 
-  for (const { url, body } of apiData) {
-    try {
-      const parsed = JSON.parse(body)
-      const scanForPayments = (obj) => {
-        if (Array.isArray(obj)) {
-          for (const item of obj) {
-            if (item && typeof item === 'object') {
-              const keys = Object.keys(item).map(k => k.toLowerCase())
-              const hasDate = keys.some(k => k.includes('date') || k.includes('дата'))
-              const hasAmount = keys.some(k => k.includes('amount') || k.includes('sum') || k.includes('сумм'))
-              if (hasDate && hasAmount) {
-                const key = JSON.stringify(item)
-                if (!seen.has(key)) {
-                  seen.add(key)
-                  const getField = (o, ...names) => {
-                    for (const n of names) {
-                      for (const k of Object.keys(o)) {
-                        if (k.toLowerCase().includes(n.toLowerCase())) return o[k]
-                      }
-                    }
-                    return ''
-                  }
-                  payments.push({
-                    date: String(getField(item, 'date', 'дата', 'ddate', 'valueDate', 'operDate') || ''),
-                    number: String(getField(item, 'number', 'num', 'docNum', 'номер', 'id', 'docId') || ''),
-                    recipient: String(getField(item, 'recipient', 'payee', 'beneficiary', 'контрагент', 'получатель', 'name', 'payeeName') || ''),
-                    amount: parseFloat(String(getField(item, 'amount', 'sum', 'summa', 'сумма', 'debit', 'credit') || '0').replace(/\s/g, '').replace(',', '.')) || 0,
-                    status: String(getField(item, 'status', 'state', 'статус', 'состояние') || ''),
-                  })
-                }
-              }
+  const getField = (o, ...names) => {
+    for (const n of names) {
+      for (const k of Object.keys(o)) {
+        if (k.toLowerCase().includes(n.toLowerCase())) return o[k]
+      }
+    }
+    return ''
+  }
+
+  const scanForPayments = (obj) => {
+    if (Array.isArray(obj) && obj.length > 0 && obj.length < 2000) {
+      for (const item of obj) {
+        if (item && typeof item === 'object') {
+          const keys = Object.keys(item).map(k => k.toLowerCase())
+          const hasDate = keys.some(k => k.includes('date') || k.includes('дата') || k.includes('time'))
+          const hasAmount = keys.some(k => k.includes('amount') || k.includes('sum') || k.includes('сумм') || k.includes('debit') || k.includes('credit'))
+          if (hasDate && hasAmount) {
+            const key = JSON.stringify(item).substring(0, 120)
+            if (!seen.has(key)) {
+              seen.add(key)
+              payments.push({
+                date: String(getField(item, 'date', 'дата', 'ddate', 'valueDate', 'operDate', 'docDate', 'createDate') || ''),
+                number: String(getField(item, 'number', 'num', 'docNum', 'номер', 'id', 'docId', 'docNumber') || ''),
+                recipient: String(getField(item, 'recipient', 'payee', 'beneficiary', 'контрагент', 'получатель', 'name', 'payeeName', 'counterparty') || ''),
+                amount: parseFloat(String(getField(item, 'amount', 'sum', 'summa', 'сумма', 'debit', 'credit', 'debitAmount') || '0').replace(/\s/g, '').replace(',', '.')) || 0,
+                status: String(getField(item, 'status', 'state', 'статус', 'состояние', 'docStatus') || ''),
+              })
             }
           }
-        } else if (obj && typeof obj === 'object') {
-          for (const v of Object.values(obj)) scanForPayments(v)
         }
       }
-      scanForPayments(parsed)
-    } catch {}
+    } else if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      for (const v of Object.values(obj)) scanForPayments(v)
+    }
+  }
+
+  for (const { url, body } of apiData) {
+    try { scanForPayments(JSON.parse(body)) } catch {}
   }
 
   if (payments.length === 0) {
     const bodyText = await p.evaluate(() => document.body.innerText)
-    console.log('[browser] No payments found. Page text:', bodyText.substring(0, 600))
-    console.log('[browser] Total API responses captured:', apiData.length)
+    console.log('[browser] No payments. Page text:', bodyText.substring(0, 600))
     for (const { url, body } of apiData) {
-      console.log('[browser] Response from', url.replace('https://dbo.centrinvest.ru', ''), ':', body.substring(0, 300))
+      console.log('[browser] Had response', url.replace(origin, ''), ':', body.substring(0, 200))
     }
   }
   console.log('[browser] Found payments:', payments.length)
