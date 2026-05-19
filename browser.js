@@ -12,7 +12,14 @@ async function getBrowser() {
   if (!browser || !browser.isConnected()) {
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--ignore-certificate-errors',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process',
+      ],
     })
   }
   return browser
