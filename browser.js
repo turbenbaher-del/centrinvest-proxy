@@ -431,18 +431,32 @@ async function getPaymentsClassicZK(p) {
       return true
     } catch {}
 
-    // 4. Pure JS click — finds element in DOM regardless of CSS visibility
+    // 4. Unhide hidden ancestors then click — DOM inspection shows elements exist but
+    //    are inside display:none popup containers. Must unhide chain first so ZK
+    //    doesn't ignore the click as "element not visible".
     const clicked = await p.evaluate((label) => {
-      for (const el of document.querySelectorAll('a, span, td, div, li')) {
-        if (el.textContent.trim() === label) {
-          el.click()
-          return `${el.tagName}.${(el.className || '').substring(0, 50)}`
+      // Target span.z-menuitemwrap-text (leaf element with exact own text)
+      for (const span of document.querySelectorAll('span.z-menuitemwrap-text')) {
+        if (span.textContent.trim() !== label) continue
+        // Walk ancestors and unhide any display:none containers
+        let el = span
+        let unhid = 0
+        while (el && el !== document.body) {
+          if (window.getComputedStyle(el).display === 'none') {
+            el.style.display = 'block'
+            unhid++
+          }
+          el = el.parentElement
         }
+        // Click the anchor parent which has the ZK event handler
+        const a = span.closest('a') || span
+        a.click()
+        return `unhid-${unhid} cls=${a.className.substring(0, 40)}`
       }
       return null
     }, label)
     if (clicked) {
-      console.log(`[zk] js-clicked: ${label} => ${clicked}`)
+      console.log(`[zk] js-unhide-click: ${label} => ${clicked}`)
       await p.waitForTimeout(7000)
       return true
     }
@@ -730,8 +744,16 @@ async function getPaymentsDebug(username, password) {
     }
     if (!done) {
       const clicked = await p.evaluate((label) => {
-        for (const el of document.querySelectorAll('a, span, td, div, li')) {
-          if (el.textContent.trim() === label) { el.click(); return el.tagName }
+        for (const span of document.querySelectorAll('span.z-menuitemwrap-text')) {
+          if (span.textContent.trim() !== label) continue
+          let el = span; let unhid = 0
+          while (el && el !== document.body) {
+            if (window.getComputedStyle(el).display === 'none') { el.style.display = 'block'; unhid++ }
+            el = el.parentElement
+          }
+          const a = span.closest('a') || span
+          a.click()
+          return `unhid-${unhid}`
         }
         return null
       }, label)
@@ -813,7 +835,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v3', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,800), allInputs, allButtons, rows, domSearch }
+  return { version: 'v4', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,800), allInputs, allButtons, rows, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
