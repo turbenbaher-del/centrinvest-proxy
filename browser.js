@@ -404,4 +404,48 @@ async function closeBrowser() {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getWhoAmI, closeBrowser }
+async function getNavDebug(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  const currentUrl = p.url()
+
+  // Dump full nav structure + all page text
+  const navItems = await p.evaluate(() => {
+    const out = []
+    document.querySelectorAll('a, button, [role="menuitem"], [role="tab"], [role="button"], li').forEach(el => {
+      const t = (el.textContent || '').trim().replace(/\s+/g, ' ')
+      const href = el.getAttribute('href') || ''
+      const cls = el.className || ''
+      if (t.length > 1 && t.length < 80) out.push({ text: t, href, cls: cls.substring(0, 60) })
+    })
+    return out.slice(0, 80)
+  })
+
+  const pageText = await p.evaluate(() => document.body.innerText.substring(0, 1000))
+
+  // Try direct API fetch from page context to discover endpoints
+  const origin = 'https://dbo.centrinvest.ru'
+  const tryPaths = [
+    '/api/v1/payments', '/api/v1/transactions', '/api/v1/documents',
+    '/api/v1/accounts', '/api/v1/history', '/api/v1/operations',
+    '/api-ui/api/v1/accounts', '/api-ui/api/v1/payments',
+    '/sbns-web/api/v1/accounts',
+  ]
+  const directResults = []
+  for (const path of tryPaths) {
+    try {
+      const result = await p.evaluate(async ({ origin, path }) => {
+        const r = await fetch(origin + path, { credentials: 'include' })
+        const ct = r.headers.get('content-type') || ''
+        const body = ct.includes('json') ? await r.text() : '[not json: ' + ct + ']'
+        return { path, status: r.status, body: body.substring(0, 300) }
+      }, { origin, path })
+      directResults.push(result)
+    } catch (e) {
+      directResults.push({ path, error: e.message })
+    }
+  }
+
+  return { currentUrl, navItems, pageText, directResults }
+}
+
+module.exports = { getAccountsData, getPaymentsData, getWhoAmI, getNavDebug, closeBrowser }
