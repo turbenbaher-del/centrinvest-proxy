@@ -419,8 +419,67 @@ async function getPaymentsClassicZK(p) {
   if (!navigated) navigated = await zkClickDirect('Исходящие документы')
   console.log('[zk] navigated:', navigated)
 
-  const afterText = await p.evaluate(() => document.body.innerText.substring(0, 600))
+  const afterText = await p.evaluate(() => document.body.innerText.substring(0, 800))
   console.log('[zk] Page after nav:', afterText)
+
+  // ZK "История операций" shows a date filter form first — must submit it to load data.
+  // Detect the filter form and fill dates: last 90 days.
+  const filterSubmitted = await p.evaluate(() => {
+    const today = new Date()
+    const fmt = (d) => {
+      const dd = String(d.getDate()).padStart(2,'0')
+      const mm = String(d.getMonth()+1).padStart(2,'0')
+      const yyyy = d.getFullYear()
+      return `${dd}.${mm}.${yyyy}`
+    }
+    const from90 = new Date(today - 90*86400000)
+    const dateFrom = fmt(from90)
+    const dateTo   = fmt(today)
+
+    // Find date inputs (ZK renders them as input[type=text] with date format hints)
+    const allInputs = Array.from(document.querySelectorAll('input[type=text], input:not([type])'))
+    const dateInputs = allInputs.filter(i => {
+      const v = i.value || ''
+      const ph = (i.placeholder || '').toLowerCase()
+      return /\d{2}\.\d{2}\.\d{4}/.test(v) || ph.includes('дата') || ph.includes('date') ||
+             i.className.includes('z-datebox') || (i.closest && i.closest('.z-datebox'))
+    })
+    console.log('Date inputs found:', dateInputs.length)
+
+    if (dateInputs.length >= 2) {
+      // Set from-date and to-date
+      const setVal = (el, val) => {
+        const nativeInput = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+        nativeInput.set.call(el, val)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+        el.dispatchEvent(new Event('blur', { bubbles: true }))
+      }
+      setVal(dateInputs[0], dateFrom)
+      setVal(dateInputs[1], dateTo)
+    }
+
+    // Look for "Показать", "Найти", "OK" buttons in the filter area
+    const btnTexts = ['Показать', 'Найти', 'Применить', 'OK', 'Поиск']
+    for (const btn of document.querySelectorAll('button, a.z-button, td.z-button')) {
+      const t = btn.textContent.trim()
+      if (btnTexts.some(b => t === b || t.startsWith(b))) {
+        btn.click()
+        return `clicked: ${t}`
+      }
+    }
+    // Try ZK button classes
+    for (const btn of document.querySelectorAll('.z-button')) {
+      const t = btn.textContent.trim()
+      if (btnTexts.some(b => t.includes(b))) {
+        btn.click()
+        return `zk-clicked: ${t}`
+      }
+    }
+    return 'no filter button found'
+  })
+  console.log('[zk] filter submit result:', filterSubmitted)
+  await p.waitForTimeout(6000)
 
   const extractPaymentRows = () => {
     const results = []
@@ -617,24 +676,61 @@ async function getPaymentsDebug(username, password) {
     try {
       const el = p.locator(sel).filter({ hasText: label }).first()
       await el.click({ timeout: 5000 })
-      await p.waitForTimeout(8000)
+      await p.waitForTimeout(7000)
       clickedLabel = label
-      console.log('[debug] Clicked:', label)
       break
     } catch {}
   }
 
-  const pageText = await p.evaluate(() => document.body.innerText.substring(0, 2000))
+  const pageTextBefore = await p.evaluate(() => document.body.innerText.substring(0, 1500))
+
+  // Try to submit the date filter
+  const filterResult = await p.evaluate(() => {
+    const today = new Date()
+    const fmt = (d) => `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`
+    const dateFrom = fmt(new Date(today - 90*86400000))
+    const dateTo = fmt(today)
+
+    const inputs = Array.from(document.querySelectorAll('input[type=text], input:not([type])'))
+    const dateInputs = inputs.filter(i => /\d{2}\.\d{2}\.\d{4}/.test(i.value) ||
+      (i.placeholder||'').toLowerCase().includes('дата'))
+    if (dateInputs.length >= 2) {
+      const setVal = (el, val) => {
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(el, val)
+        el.dispatchEvent(new Event('input',{bubbles:true}))
+        el.dispatchEvent(new Event('change',{bubbles:true}))
+        el.dispatchEvent(new Event('blur',{bubbles:true}))
+      }
+      setVal(dateInputs[0], dateFrom)
+      setVal(dateInputs[1], dateTo)
+    }
+    for (const btn of document.querySelectorAll('button, .z-button, a.z-button')) {
+      const t = btn.textContent.trim()
+      if (['Показать','Найти','Применить','OK','Поиск'].some(b => t.startsWith(b))) {
+        btn.click(); return `clicked: ${t}`
+      }
+    }
+    return `no btn, dateInputs: ${dateInputs.length}`
+  })
+  await p.waitForTimeout(7000)
+
+  const pageTextAfter = await p.evaluate(() => document.body.innerText.substring(0, 2000))
+  const allInputs = await p.evaluate(() =>
+    Array.from(document.querySelectorAll('input')).map(i => ({ type: i.type, value: i.value, placeholder: i.placeholder, cls: i.className.substring(0,40) })).slice(0, 20)
+  )
+  const allButtons = await p.evaluate(() =>
+    Array.from(document.querySelectorAll('button, .z-button')).map(b => b.textContent.trim()).filter(Boolean).slice(0, 20)
+  )
   const rows = await p.evaluate(() => {
     const out = []
     document.querySelectorAll('tr').forEach(row => {
       const cells = Array.from(row.querySelectorAll('td')).map(td => td.textContent.trim()).filter(Boolean)
-      if (cells.length >= 2) out.push({ cls: row.className, cells: cells.slice(0, 8) })
+      if (cells.length >= 2) out.push({ cls: row.className.substring(0,50), cells: cells.slice(0, 8) })
     })
-    return out.slice(0, 30)
+    return out.slice(0, 40)
   })
 
-  return { clickedLabel, pageText, rows }
+  return { clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter, allInputs, allButtons, rows }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
