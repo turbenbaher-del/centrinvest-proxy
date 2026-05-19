@@ -483,48 +483,41 @@ async function getPaymentsClassicZK(p) {
   const dateTo   = fmt(today)
   let filterSubmitted = 'no date inputs found'
 
+  // Try to fill date inputs. Use force:true + short timeout so we don't block on
+  // invisible inputs. Fall back to JS native setter if Playwright click fails.
   try {
     const dateInputs = p.locator('input.z-dateboxwrap-input')
     const count = await dateInputs.count()
     console.log('[zk] z-dateboxwrap-input count:', count)
     if (count >= 2) {
-      await dateInputs.first().click()
-      await dateInputs.first().fill(dateFrom)
-      await dateInputs.first().press('Tab')
+      // force:true bypasses actionability/visibility checks
+      await dateInputs.first().click({ force: true, timeout: 3000 }).catch(() => {})
+      await dateInputs.first().fill(dateFrom).catch(() => {})
+      await dateInputs.first().press('Tab').catch(() => {})
       await p.waitForTimeout(300)
-      await dateInputs.nth(1).click()
-      await dateInputs.nth(1).fill(dateTo)
-      await dateInputs.nth(1).press('Enter')
+      await dateInputs.nth(1).click({ force: true, timeout: 3000 }).catch(() => {})
+      await dateInputs.nth(1).fill(dateTo).catch(() => {})
+      await dateInputs.nth(1).press('Enter').catch(() => {})
       filterSubmitted = `playwright-fill: ${dateFrom} -> ${dateTo}`
-      console.log('[zk] Date inputs filled:', filterSubmitted)
-      await p.waitForTimeout(5000)
-    } else {
-      // Fallback: JS evaluate approach for other date input patterns
-      filterSubmitted = await p.evaluate(({ dateFrom, dateTo }) => {
-        const allInputs = Array.from(document.querySelectorAll('input[type=text], input:not([type])'))
-        const dateInputs = allInputs.filter(i =>
-          /\d{2}\.\d{2}\.\d{4}/.test(i.value) || (i.placeholder||'').toLowerCase().includes('дата') ||
-          i.className.includes('z-datebox') || (i.closest && i.closest('.z-datebox'))
-        )
-        if (dateInputs.length >= 2) {
-          const set = (el, val) => {
-            Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(el, val)
-            el.dispatchEvent(new Event('input',{bubbles:true}))
-            el.dispatchEvent(new Event('change',{bubbles:true}))
-            el.dispatchEvent(new Event('blur',{bubbles:true}))
-          }
-          set(dateInputs[0], dateFrom)
-          set(dateInputs[1], dateTo)
-          return `js-set: ${dateFrom} -> ${dateTo}`
-        }
-        return 'no date inputs'
-      }, { dateFrom, dateTo })
-      await p.waitForTimeout(5000)
+      console.log('[zk] Date inputs filled')
     }
-  } catch (e) {
-    console.log('[zk] Date fill error:', e.message)
-    filterSubmitted = `error: ${e.message}`
-  }
+  } catch {}
+
+  // Always try JS native setter as additional measure
+  const jsResult = await p.evaluate(({ dateFrom, dateTo }) => {
+    const inputs = [...document.querySelectorAll('input.z-dateboxwrap-input, input[class*="z-datebox"]')]
+    if (inputs.length < 2) return 'no-inputs'
+    const set = (el, val) => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(el, val)
+      el.dispatchEvent(new Event('input',{bubbles:true}))
+      el.dispatchEvent(new Event('change',{bubbles:true}))
+      el.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true,key:'Enter',keyCode:13}))
+    }
+    set(inputs[0], dateFrom); set(inputs[1], dateTo)
+    return `js-set-ok`
+  }, { dateFrom, dateTo })
+  filterSubmitted = `${filterSubmitted || 'no-click'}+${jsResult}`
+  await p.waitForTimeout(3000)
 
   // Try to click any search/apply button (page may or may not have one)
   const btnClicked = await p.evaluate(() => {
@@ -781,12 +774,37 @@ async function getPaymentsDebug(username, password) {
     const dbgInputs = p.locator('input.z-dateboxwrap-input')
     const dbgCount = await dbgInputs.count()
     if (dbgCount >= 2) {
-      await dbgInputs.first().click(); await dbgInputs.first().fill(dbgDateFrom); await dbgInputs.first().press('Tab')
+      await dbgInputs.first().click({ force: true, timeout: 3000 }).catch(() => {})
+      await dbgInputs.first().fill(dbgDateFrom).catch(() => {})
+      await dbgInputs.first().press('Tab').catch(() => {})
       await p.waitForTimeout(300)
-      await dbgInputs.nth(1).click(); await dbgInputs.nth(1).fill(dbgDateTo); await dbgInputs.nth(1).press('Enter')
+      await dbgInputs.nth(1).click({ force: true, timeout: 3000 }).catch(() => {})
+      await dbgInputs.nth(1).fill(dbgDateTo).catch(() => {})
+      await dbgInputs.nth(1).press('Enter').catch(() => {})
       filterResult = `playwright-fill: ${dbgDateFrom}->${dbgDateTo}`
     }
   } catch (e) { filterResult = `error: ${e.message}` }
+  // Also try JS setter
+  const dbgJs = await p.evaluate(({ df, dt }) => {
+    const inputs = [...document.querySelectorAll('input.z-dateboxwrap-input')]
+    if (inputs.length < 2) return 'no-inputs'
+    const set = (el,v) => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(el,v)
+      el.dispatchEvent(new Event('input',{bubbles:true}))
+      el.dispatchEvent(new Event('change',{bubbles:true}))
+    }
+    set(inputs[0],df); set(inputs[1],dt); return 'js-ok'
+  }, { df: dbgDateFrom, dt: dbgDateTo })
+  filterResult = `${filterResult}+${dbgJs}`
+  // Click Показать if present
+  const showClicked = await p.evaluate(() => {
+    for (const btn of document.querySelectorAll('button,.z-button,a.z-button,td.z-button')) {
+      const t = btn.textContent.trim()
+      if (['Показать','Найти','Применить'].some(b => t.includes(b))) { btn.click(); return t }
+    }
+    return null
+  })
+  filterResult = `${filterResult}|btn:${showClicked}`
   await p.waitForTimeout(7000)
 
   const pageTextAfter = await p.evaluate(() => document.body.innerText.substring(0, 2000))
@@ -830,7 +848,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v6', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,800), allInputs, allButtons, rows, domSearch }
+  return { version: 'v7', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,800), allInputs, allButtons, rows, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
