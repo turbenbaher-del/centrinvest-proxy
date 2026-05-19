@@ -474,23 +474,33 @@ async function getPaymentsClassicZK(p) {
   const afterText = await p.evaluate(() => document.body.innerText.substring(0, 800))
   console.log('[zk] Page after nav:', afterText)
 
-  // "История операций" has date inputs with class "z-dateboxwrap-input".
-  // Fill them via Playwright native fill+press (properly triggers ZK events),
-  // then press Enter to apply the filter. No explicit "Показать" button exists.
+  // Switch to "Выписки за период" tab which shows individual transactions with amounts,
+  // rather than statement summaries ("Все выписки" tab has no amount column).
+  const tabSwitched = await p.evaluate(() => {
+    for (const el of document.querySelectorAll('button, td.z-button, a.z-button, .z-button, .z-toolbarbutton, .z-tab, [class*="tab"]')) {
+      const t = (el.textContent || '').trim().toUpperCase()
+      if (t === 'ВЫПИСКИ ЗА ПЕРИОД') { el.click(); return el.textContent.trim() }
+    }
+    return null
+  })
+  if (tabSwitched) {
+    console.log('[zk] Switched to tab:', tabSwitched)
+    await p.waitForTimeout(5000)
+  } else {
+    console.log('[zk] ВЫПИСКИ ЗА ПЕРИОД tab not found, staying on current view')
+  }
+
   const today = new Date()
   const fmt = (d) => `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`
   const dateFrom = fmt(new Date(today - 90 * 86400000))
   const dateTo   = fmt(today)
   let filterSubmitted = 'no date inputs found'
 
-  // Try to fill date inputs. Use force:true + short timeout so we don't block on
-  // invisible inputs. Fall back to JS native setter if Playwright click fails.
   try {
     const dateInputs = p.locator('input.z-dateboxwrap-input')
     const count = await dateInputs.count()
     console.log('[zk] z-dateboxwrap-input count:', count)
     if (count >= 2) {
-      // force:true bypasses actionability/visibility checks
       await dateInputs.first().click({ force: true, timeout: 3000 }).catch(() => {})
       await dateInputs.first().fill(dateFrom).catch(() => {})
       await dateInputs.first().press('Tab').catch(() => {})
@@ -503,7 +513,6 @@ async function getPaymentsClassicZK(p) {
     }
   } catch {}
 
-  // Always try JS native setter as additional measure
   const jsResult = await p.evaluate(({ dateFrom, dateTo }) => {
     const inputs = [...document.querySelectorAll('input.z-dateboxwrap-input, input[class*="z-datebox"]')]
     if (inputs.length < 2) return 'no-inputs'
@@ -519,7 +528,6 @@ async function getPaymentsClassicZK(p) {
   filterSubmitted = `${filterSubmitted || 'no-click'}+${jsResult}`
   await p.waitForTimeout(3000)
 
-  // Try to click any search/apply button (page may or may not have one)
   const btnClicked = await p.evaluate(() => {
     const btnTexts = ['Показать', 'Найти', 'Применить', 'Поиск', 'Искать']
     for (const btn of document.querySelectorAll('button, .z-button, a.z-button, td.z-button, .z-toolbarbutton')) {
@@ -530,19 +538,6 @@ async function getPaymentsClassicZK(p) {
   })
   console.log('[zk] filter result:', filterSubmitted, '| btn:', btnClicked)
   await p.waitForTimeout(6000)
-
-  // Click "Развернуть" to expand statement summary rows into individual transactions
-  const expandClicked = await p.evaluate(() => {
-    for (const btn of document.querySelectorAll('button, .z-button, a.z-button, td.z-button, .z-toolbarbutton')) {
-      const t = btn.textContent.trim()
-      if (t === 'Развернуть' || t === 'Развернуть все') { btn.click(); return t }
-    }
-    return null
-  })
-  if (expandClicked) {
-    console.log('[zk] Clicked Развернуть:', expandClicked)
-    await p.waitForTimeout(8000)
-  }
 
   const extractPaymentRows = () => {
     const results = []
@@ -822,16 +817,38 @@ async function getPaymentsDebug(username, password) {
   filterResult = `${filterResult}|btn:${showClicked}`
   await p.waitForTimeout(7000)
 
-  // Click Развернуть to expand statement rows into individual transactions
-  const expandClicked = await p.evaluate(() => {
-    for (const btn of document.querySelectorAll('button, .z-button, a.z-button, td.z-button, .z-toolbarbutton')) {
-      const t = btn.textContent.trim()
-      if (t === 'Развернуть' || t === 'Развернуть все') { btn.click(); return t }
+  // Switch to "Выписки за период" for individual transaction rows with amounts
+  const tabSwitched = await p.evaluate(() => {
+    for (const el of document.querySelectorAll('button, td.z-button, a.z-button, .z-button, .z-toolbarbutton, .z-tab, [class*="tab"]')) {
+      const t = (el.textContent || '').trim().toUpperCase()
+      if (t === 'ВЫПИСКИ ЗА ПЕРИОД') { el.click(); return el.textContent.trim() }
     }
     return null
   })
-  filterResult = `${filterResult}|expand:${expandClicked}`
-  if (expandClicked) await p.waitForTimeout(8000)
+  filterResult = `${filterResult}|tab:${tabSwitched}`
+  if (tabSwitched) await p.waitForTimeout(6000)
+
+  // Re-fill dates on the new tab and click Показать
+  const dbgDateFrom2 = dbgDateFrom, dbgDateTo2 = dbgDateTo
+  await p.evaluate(({ df, dt }) => {
+    const inputs = [...document.querySelectorAll('input.z-dateboxwrap-input')]
+    if (inputs.length < 2) return
+    const set = (el,v) => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(el,v)
+      el.dispatchEvent(new Event('input',{bubbles:true}))
+      el.dispatchEvent(new Event('change',{bubbles:true}))
+    }
+    set(inputs[0],df); set(inputs[1],dt)
+  }, { df: dbgDateFrom2, dt: dbgDateTo2 })
+  const showClicked2 = await p.evaluate(() => {
+    for (const btn of document.querySelectorAll('button,.z-button,a.z-button,td.z-button')) {
+      const t = btn.textContent.trim()
+      if (['Показать','Найти','Применить'].some(b => t.includes(b))) { btn.click(); return t }
+    }
+    return null
+  })
+  filterResult = `${filterResult}|btn2:${showClicked2}`
+  if (showClicked2) await p.waitForTimeout(8000)
 
   const pageTextAfter = await p.evaluate(() => document.body.innerText.substring(0, 2000))
   const allInputs = await p.evaluate(() =>
@@ -893,7 +910,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v8', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,1000), allInputs, allButtons, rows, dateRowsHtml, domSearch }
+  return { version: 'v9', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,1000), allInputs, allButtons, rows, dateRowsHtml, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
