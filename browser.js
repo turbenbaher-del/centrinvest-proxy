@@ -728,10 +728,7 @@ async function getTemplatesData(username, password) {
 
 async function getPaymentsDebug(username, password) {
   const p = await ensureLoggedIn(username, password)
-  // Always reset to main page to avoid stale state from previous debug runs
-  await p.goto(MAIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
-  await p.waitForTimeout(3000)
-  console.log('[debug] Reset to:', p.url())
+  console.log('[debug] Current URL:', p.url())
 
   const subSel = 'a.z-menuitemwrap-content, span.z-menuitemwrap-content, td.z-menuitemwrap-content, a.z-menuitem-content'
   let clickedLabel = null
@@ -910,7 +907,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v12', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,3000), popupText, allInputs, allButtons, rows, dateRowsHtml, domSearch }
+  return { version: 'v13', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,3000), popupText, allInputs, allButtons, rows, dateRowsHtml, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
