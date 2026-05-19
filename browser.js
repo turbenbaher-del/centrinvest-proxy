@@ -464,9 +464,11 @@ async function getPaymentsClassicZK(p) {
     return false
   }
 
-  // Try "История операций" first (shows all ops), fall back to "Исходящие документы"
-  let navigated = await zkClickMenu('История операций')
+  // "Выписки" (Statement) shows ALL account operations as a flat table with date filter.
+  // Fall back to "Исходящие документы" (outgoing only) if "Выписки" isn't found.
+  let navigated = await zkClickMenu('Выписки')
   if (!navigated) navigated = await zkClickMenu('Исходящие документы')
+  if (!navigated) navigated = await zkClickMenu('История операций')
   console.log('[zk] navigated:', navigated)
 
   const afterText = await p.evaluate(() => document.body.innerText.substring(0, 800))
@@ -727,7 +729,7 @@ async function getPaymentsDebug(username, password) {
 
   const subSel = 'a.z-menuitemwrap-content, span.z-menuitemwrap-content, td.z-menuitemwrap-content, a.z-menuitem-content'
   let clickedLabel = null
-  for (const label of ['История операций', 'Исходящие документы']) {
+  for (const label of ['Выписки', 'Исходящие документы', 'История операций']) {
     // Try standard click first, then hover parents, then JS force-click
     let done = false
     try {
@@ -828,7 +830,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v5', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,800), allInputs, allButtons, rows, domSearch }
+  return { version: 'v6', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,800), allInputs, allButtons, rows, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
