@@ -531,15 +531,29 @@ async function getPaymentsClassicZK(p) {
   console.log('[zk] filter result:', filterSubmitted, '| btn:', btnClicked)
   await p.waitForTimeout(6000)
 
+  // Click "Развернуть" to expand statement summary rows into individual transactions
+  const expandClicked = await p.evaluate(() => {
+    for (const btn of document.querySelectorAll('button, .z-button, a.z-button, td.z-button, .z-toolbarbutton')) {
+      const t = btn.textContent.trim()
+      if (t === 'Развернуть' || t === 'Развернуть все') { btn.click(); return t }
+    }
+    return null
+  })
+  if (expandClicked) {
+    console.log('[zk] Clicked Развернуть:', expandClicked)
+    await p.waitForTimeout(8000)
+  }
+
   const extractPaymentRows = () => {
     const results = []
     const seen = new Set()
 
-    const processRows = (selector) => {
+    const processRows = (selector, useChildren) => {
       document.querySelectorAll(selector).forEach(row => {
-        const cells = Array.from(row.querySelectorAll('td'))
-          .map(td => td.textContent.trim())
-          .filter(Boolean)
+        const cellEls = useChildren
+          ? Array.from(row.querySelectorAll('td, .z-listcell, .z-cell, .z-detailtd'))
+          : Array.from(row.querySelectorAll('td'))
+        const cells = cellEls.map(td => td.textContent.trim()).filter(Boolean)
         if (cells.length < 3) return
         // Accept dates with or without time: 19.05.2026 or 19.05.2026 02:25
         const dateIdx = cells.findIndex(c => /^\d{2}\.\d{2}\.\d{4}/.test(c))
@@ -550,7 +564,7 @@ async function getPaymentsClassicZK(p) {
           c === 'Номер' || c === 'Сумма' || c === 'Получатель'
         )) return
         // Amount: digits/spaces + comma/dot + 1-2 digits (handles "221,10" and "1 234,56")
-        const amtCell = cells.find(c => /^[\d\s]+[,\.]\d{1,2}$/.test(c.trim()))
+        const amtCell = cells.find(c => /^[\d\s]+[,\.]\d{1,2}$/.test(c.trim()) && c.trim() !== '0,00')
         if (!amtCell) return
         const key = cells.slice(0, 4).join('|')
         if (seen.has(key)) return
@@ -562,7 +576,6 @@ async function getPaymentsClassicZK(p) {
           !/^\d{5}\.\d{3}/.test(c) &&
           !c.includes('за ')
         ) || ''
-        // Extract just the date part (without time)
         const dateRaw = cells[dateIdx]
         const dateOnly = (dateRaw.match(/\d{2}\.\d{2}\.\d{4}/) || [dateRaw])[0]
         results.push({
@@ -575,8 +588,10 @@ async function getPaymentsClassicZK(p) {
       })
     }
 
-    processRows('tr.z-listitem, tr.z-row, tr[class*="listitem"], tr[class*="z-list"]')
-    if (results.length === 0) processRows('tr')
+    processRows('tr.z-listitem, tr.z-row, tr[class*="listitem"], tr[class*="z-list"]', false)
+    if (results.length === 0) processRows('tr', false)
+    // Also try ZK detail/grid rows that use non-tr containers
+    if (results.length === 0) processRows('[class*="z-detail"], [class*="z-row"], [class*="listitem"]', true)
     return results
   }
 
@@ -807,6 +822,17 @@ async function getPaymentsDebug(username, password) {
   filterResult = `${filterResult}|btn:${showClicked}`
   await p.waitForTimeout(7000)
 
+  // Click Развернуть to expand statement rows into individual transactions
+  const expandClicked = await p.evaluate(() => {
+    for (const btn of document.querySelectorAll('button, .z-button, a.z-button, td.z-button, .z-toolbarbutton')) {
+      const t = btn.textContent.trim()
+      if (t === 'Развернуть' || t === 'Развернуть все') { btn.click(); return t }
+    }
+    return null
+  })
+  filterResult = `${filterResult}|expand:${expandClicked}`
+  if (expandClicked) await p.waitForTimeout(8000)
+
   const pageTextAfter = await p.evaluate(() => document.body.innerText.substring(0, 2000))
   const allInputs = await p.evaluate(() =>
     Array.from(document.querySelectorAll('input')).map(i => ({ type: i.type, value: i.value, placeholder: i.placeholder, cls: i.className.substring(0,40) })).slice(0, 20)
@@ -820,7 +846,26 @@ async function getPaymentsDebug(username, password) {
       const cells = Array.from(row.querySelectorAll('td')).map(td => td.textContent.trim()).filter(Boolean)
       if (cells.length >= 2) out.push({ cls: row.className.substring(0,50), cells: cells.slice(0, 8) })
     })
-    return out.slice(0, 40)
+    return out.slice(0, 60)
+  })
+
+  // Dump structure around rows containing date-like text (dd.mm.yyyy) to understand DOM
+  const dateRowsHtml = await p.evaluate(() => {
+    const out = []
+    const dateRe = /\d{2}\.\d{2}\.\d{4}/
+    // Check non-tr rows too (ZK grid/detail rows use div)
+    for (const el of document.querySelectorAll('tr, [class*="z-row"], [class*="z-listitem"], [class*="z-detail"]')) {
+      if (dateRe.test(el.textContent || '')) {
+        out.push({
+          tag: el.tagName,
+          cls: (el.className || '').substring(0, 60),
+          text: (el.textContent || '').trim().substring(0, 120),
+          html: el.outerHTML.substring(0, 400),
+        })
+        if (out.length >= 10) break
+      }
+    }
+    return out
   })
 
   // Inspect DOM for target labels — help diagnose why click fails
@@ -848,7 +893,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v7', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,800), allInputs, allButtons, rows, domSearch }
+  return { version: 'v8', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,1000), allInputs, allButtons, rows, dateRowsHtml, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
