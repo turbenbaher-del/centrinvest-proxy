@@ -817,38 +817,20 @@ async function getPaymentsDebug(username, password) {
   filterResult = `${filterResult}|btn:${showClicked}`
   await p.waitForTimeout(7000)
 
-  // Switch to "Выписки за период" for individual transaction rows with amounts
-  const tabSwitched = await p.evaluate(() => {
-    for (const el of document.querySelectorAll('button, td.z-button, a.z-button, .z-button, .z-toolbarbutton, .z-tab, [class*="tab"]')) {
-      const t = (el.textContent || '').trim().toUpperCase()
-      if (t === 'ВЫПИСКИ ЗА ПЕРИОД') { el.click(); return el.textContent.trim() }
-    }
-    return null
+  // Try clicking the first statement row (z-listitem with a date) to see if it opens
+  // a detail view with individual transactions (debit/credit amounts)
+  const rowClicked = await p.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll('tr.z-listitem'))
+    const dateRow = rows.find(r => /\d{2}\.\d{2}\.\d{4}/.test(r.textContent))
+    if (!dateRow) return null
+    dateRow.click()
+    return (dateRow.textContent || '').trim().substring(0, 100)
   })
-  filterResult = `${filterResult}|tab:${tabSwitched}`
-  if (tabSwitched) await p.waitForTimeout(6000)
-
-  // Re-fill dates on the new tab and click Показать
-  const dbgDateFrom2 = dbgDateFrom, dbgDateTo2 = dbgDateTo
-  await p.evaluate(({ df, dt }) => {
-    const inputs = [...document.querySelectorAll('input.z-dateboxwrap-input')]
-    if (inputs.length < 2) return
-    const set = (el,v) => {
-      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(el,v)
-      el.dispatchEvent(new Event('input',{bubbles:true}))
-      el.dispatchEvent(new Event('change',{bubbles:true}))
-    }
-    set(inputs[0],df); set(inputs[1],dt)
-  }, { df: dbgDateFrom2, dt: dbgDateTo2 })
-  const showClicked2 = await p.evaluate(() => {
-    for (const btn of document.querySelectorAll('button,.z-button,a.z-button,td.z-button')) {
-      const t = btn.textContent.trim()
-      if (['Показать','Найти','Применить'].some(b => t.includes(b))) { btn.click(); return t }
-    }
-    return null
-  })
-  filterResult = `${filterResult}|btn2:${showClicked2}`
-  if (showClicked2) await p.waitForTimeout(8000)
+  filterResult = `${filterResult}|row:${rowClicked ? 'clicked' : 'null'}`
+  if (rowClicked) {
+    console.log('[dbg] Clicked statement row:', rowClicked)
+    await p.waitForTimeout(8000)
+  }
 
   const pageTextAfter = await p.evaluate(() => document.body.innerText.substring(0, 2000))
   const allInputs = await p.evaluate(() =>
@@ -910,7 +892,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v9', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,1000), allInputs, allButtons, rows, dateRowsHtml, domSearch }
+  return { version: 'v10', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,1000), allInputs, allButtons, rows, dateRowsHtml, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
