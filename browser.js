@@ -3,7 +3,6 @@ const { chromium } = require('playwright-chromium')
 let browser = null
 let page = null
 let sessionExpiry = 0
-let isNewInterface = false
 
 const BASE = 'https://dbo.centrinvest.ru/sbns-web'
 const LOGIN_URL = `${BASE}/ru/html/login.html`
@@ -19,7 +18,7 @@ async function getBrowser() {
         '--ignore-certificate-errors',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--single-process',
+        '--no-zygote',
       ],
     })
   }
@@ -30,11 +29,8 @@ async function ensureLoggedIn(username, password) {
   const now = Date.now()
   if (page && now < sessionExpiry) {
     try {
-      const checkUrl = isNewInterface
-        ? 'https://dbo.centrinvest.ru/api-ui/'
-        : MAIN_URL
-      await page.goto(checkUrl, { timeout: 12000, waitUntil: 'domcontentloaded' })
-      if (!page.url().toString().includes('login.html')) {
+      await page.goto(MAIN_URL, { timeout: 12000, waitUntil: 'domcontentloaded' })
+      if (!page.url().toString().includes('login.html') && !page.url().includes('api-ui')) {
         return page
       }
     } catch {}
@@ -51,9 +47,7 @@ async function ensureLoggedIn(username, password) {
 
   await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
-  try {
-    await page.click('#btn', { timeout: 2000 })
-  } catch {}
+  try { await page.click('#btn', { timeout: 2000 }) } catch {}
 
   await page.fill('#userName', username.toLowerCase())
   await page.fill('#password', password)
@@ -62,90 +56,34 @@ async function ensureLoggedIn(username, password) {
   await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 20000 })
   await page.waitForTimeout(2000)
 
-  isNewInterface = page.url().includes('/api-ui')
-  console.log('[browser] Interface:', isNewInterface ? 'NEW (/api-ui/)' : 'CLASSIC (ZK)')
+  console.log('[browser] After login URL:', page.url())
+
+  // If new interface opened — click the "switch to classic" button
+  if (page.url().includes('/api-ui')) {
+    console.log('[browser] New interface — clicking ПЕРЕЙТИ В СТАНДАРТНЫЙ ИНТЕРФЕЙС...')
+    try {
+      await page.click('text=ПЕРЕЙТИ В СТАНДАРТНЫЙ ИНТЕРФЕЙС', { timeout: 8000 })
+      await page.waitForURL(url => url.toString().includes('main.zul'), { timeout: 15000 })
+      await page.waitForTimeout(2000)
+      console.log('[browser] Switched to classic, URL:', page.url())
+    } catch (e) {
+      console.log('[browser] Could not switch interface:', e.message)
+    }
+  }
 
   sessionExpiry = Date.now() + 20 * 60 * 1000
-  console.log('[browser] Logged in, URL:', page.url())
+  console.log('[browser] Session ready, URL:', page.url())
   return page
 }
 
 async function getAccountsData(username, password) {
   const p = await ensureLoggedIn(username, password)
 
-  if (isNewInterface) {
-    return getAccountsNewInterface(p)
-  } else {
-    return getAccountsClassicInterface(p)
-  }
-}
-
-async function getAccountsNewInterface(p) {
-  console.log('[browser] Using new interface to get accounts via API interception')
-
-  // Intercept REST API responses to capture accounts data
-  const capturedAccounts = []
-
-  await p.route('**/*', async (route, request) => {
-    const url = request.url()
-    const response = await route.fetch()
-    // Log API calls that might have account data
-    if (url.includes('/api') || url.includes('/account') || url.includes('/balance')) {
-      try {
-        const body = await response.text()
-        if (body.includes('balance') || body.includes('account') || body.includes('number')) {
-          console.log('[api]', request.method(), url.replace('https://dbo.centrinvest.ru', ''))
-          // Look for 20-digit numbers in API responses
-          const nums = body.match(/\d{20}/g)
-          if (nums) {
-            console.log('[api] found numbers:', nums.slice(0, 5))
-            nums.forEach(n => capturedAccounts.push(n))
-          }
-          if (body.length < 3000) console.log('[api] body:', body.substring(0, 500))
-        }
-      } catch {}
-    }
-    route.fulfill({ response })
-  })
-
-  // Navigate through sections to trigger API calls
-  try {
-    await p.click('text=Счета и платежи', { timeout: 5000 })
-    await p.waitForTimeout(3000)
-  } catch {}
-
-  try {
-    await p.click('text=Выписка', { timeout: 3000 })
-    await p.waitForTimeout(3000)
-  } catch {}
-
-  await p.unroute('**/*')
-
-  console.log('[browser] Captured account numbers:', capturedAccounts)
-
-  if (capturedAccounts.length > 0) {
-    const seen = new Set()
-    return capturedAccounts
-      .filter(n => { if (seen.has(n)) return false; seen.add(n); return true })
-      .map(number => ({ number, currency: 'RUR', balance: 0, status: 'Открыт' }))
-  }
-
-  // Fallback: scrape DOM
-  const bodyText = await p.evaluate(() => document.body.innerText)
-  console.log('[browser] URL:', p.url())
-  console.log('[browser] Page text (2000):', bodyText.substring(0, 2000))
-
-  return []
-}
-
-async function getAccountsClassicInterface(p) {
-  console.log('[browser] Using classic ZK interface to get accounts')
-
   try {
     await p.click('text=СЧЕТА', { timeout: 5000 })
-    console.log('[browser] Clicked СЧЕТА menu')
+    console.log('[browser] Clicked СЧЕТА')
   } catch (e) {
-    console.log('[browser] Could not click СЧЕТА:', e.message)
+    console.log('[browser] СЧЕТА click failed:', e.message)
   }
 
   let accounts = []
@@ -180,7 +118,8 @@ async function getAccountsClassicInterface(p) {
 
   if (accounts.length === 0) {
     const bodyText = await p.evaluate(() => document.body.innerText)
-    console.log('[browser] Page text (first 600):', bodyText.substring(0, 600))
+    console.log('[browser] Final URL:', p.url())
+    console.log('[browser] Page text:', bodyText.substring(0, 600))
   }
 
   console.log('[browser] Found accounts:', accounts.length, accounts.map(a => a.number))
@@ -198,8 +137,7 @@ async function getPaymentsData(username, password) {
   const p = await ensureLoggedIn(username, password)
 
   try {
-    const menuText = isNewInterface ? 'Мои документы' : 'ПЛАТЕЖНЫЕ ДОКУМЕНТЫ'
-    await p.click(`text=${menuText}`, { timeout: 5000 })
+    await p.click('text=ПЛАТЕЖНЫЕ ДОКУМЕНТЫ', { timeout: 5000 })
     await p.waitForTimeout(3000)
   } catch {}
 
@@ -245,7 +183,6 @@ async function closeBrowser() {
     browser = null
     page = null
     sessionExpiry = 0
-    isNewInterface = false
   }
 }
 
