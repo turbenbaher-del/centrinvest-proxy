@@ -139,7 +139,8 @@ async function getAccountsNewInterface(p) {
 
   if (accounts.length === 0) {
     const bodyText = await p.evaluate(() => document.body.innerText)
-    console.log('[browser] Page text (first 800):', bodyText.substring(0, 800))
+    console.log('[browser] URL after nav:', p.url())
+    console.log('[browser] Page text (2000):', bodyText.substring(0, 2000))
   }
 
   console.log('[browser] Found accounts:', accounts.length, accounts.map(a => a.number))
