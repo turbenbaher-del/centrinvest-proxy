@@ -202,7 +202,7 @@ async function getPaymentsData(username, password) {
 }
 
 async function getPaymentsViaResponseListener(p) {
-  console.log('[browser] Listening to REST API for payments...')
+  console.log('[browser] Navigating to collect payment/transaction responses...')
   const apiData = []
 
   const onResponse = async (response) => {
@@ -213,8 +213,9 @@ async function getPaymentsViaResponseListener(p) {
       const ct = response.headers()['content-type'] || ''
       if (!ct.includes('json')) return
       const body = await response.text()
-      if (body.length > 20) {
-        console.log('[api pay]', response.request().method(), url.replace('https://dbo.centrinvest.ru', ''), body.length + 'b')
+      if (body.length > 50) {
+        console.log('[api tx]', response.request().method(), url.replace('https://dbo.centrinvest.ru', ''), body.length + 'b')
+        if (body.length < 3000) console.log('[api tx] body:', body.substring(0, 600))
         apiData.push({ url, body })
       }
     } catch {}
@@ -222,10 +223,23 @@ async function getPaymentsViaResponseListener(p) {
 
   p.on('response', onResponse)
 
-  const clickTargets = ['text=Платежи', 'text=Счета и платежи', 'text=Платёжные документы',
-    'text=Платежные документы', 'text=История', 'text=Исходящие']
-  for (const t of clickTargets) {
-    try { await p.click(t, { timeout: 3000 }); await p.waitForTimeout(2000) } catch {}
+  // Re-navigate through the accounts/statements section to trigger transaction APIs
+  const navSequences = [
+    // Typical "Accounts & Payments" → sub-sections
+    ['text=Счета и платежи', 'text=Выписка'],
+    ['text=Счета и платежи', 'text=История операций'],
+    ['text=Счета и платежи', 'text=Платежи'],
+    ['text=Счета и платежи', 'text=Исходящие'],
+    // Top-level navigation
+    ['text=Платежи'],
+    ['text=История'],
+    ['text=Исходящие платежи'],
+  ]
+  for (const seq of navSequences) {
+    for (const t of seq) {
+      try { await p.click(t, { timeout: 3000 }); await p.waitForTimeout(1500) } catch {}
+    }
+    await p.waitForTimeout(1000)
   }
 
   p.off('response', onResponse)
@@ -277,7 +291,11 @@ async function getPaymentsViaResponseListener(p) {
 
   if (payments.length === 0) {
     const bodyText = await p.evaluate(() => document.body.innerText)
-    console.log('[browser] No payments found. Page text:', bodyText.substring(0, 400))
+    console.log('[browser] No payments found. Page text:', bodyText.substring(0, 600))
+    console.log('[browser] Total API responses captured:', apiData.length)
+    for (const { url, body } of apiData) {
+      console.log('[browser] Response from', url.replace('https://dbo.centrinvest.ru', ''), ':', body.substring(0, 300))
+    }
   }
   console.log('[browser] Found payments:', payments.length)
   return payments
