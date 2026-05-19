@@ -472,63 +472,68 @@ async function getPaymentsClassicZK(p) {
   const afterText = await p.evaluate(() => document.body.innerText.substring(0, 800))
   console.log('[zk] Page after nav:', afterText)
 
-  // ZK "История операций" shows a date filter form first — must submit it to load data.
-  // Detect the filter form and fill dates: last 90 days.
-  const filterSubmitted = await p.evaluate(() => {
-    const today = new Date()
-    const fmt = (d) => {
-      const dd = String(d.getDate()).padStart(2,'0')
-      const mm = String(d.getMonth()+1).padStart(2,'0')
-      const yyyy = d.getFullYear()
-      return `${dd}.${mm}.${yyyy}`
+  // "История операций" has date inputs with class "z-dateboxwrap-input".
+  // Fill them via Playwright native fill+press (properly triggers ZK events),
+  // then press Enter to apply the filter. No explicit "Показать" button exists.
+  const today = new Date()
+  const fmt = (d) => `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`
+  const dateFrom = fmt(new Date(today - 90 * 86400000))
+  const dateTo   = fmt(today)
+  let filterSubmitted = 'no date inputs found'
+
+  try {
+    const dateInputs = p.locator('input.z-dateboxwrap-input')
+    const count = await dateInputs.count()
+    console.log('[zk] z-dateboxwrap-input count:', count)
+    if (count >= 2) {
+      await dateInputs.first().click()
+      await dateInputs.first().fill(dateFrom)
+      await dateInputs.first().press('Tab')
+      await p.waitForTimeout(300)
+      await dateInputs.nth(1).click()
+      await dateInputs.nth(1).fill(dateTo)
+      await dateInputs.nth(1).press('Enter')
+      filterSubmitted = `playwright-fill: ${dateFrom} -> ${dateTo}`
+      console.log('[zk] Date inputs filled:', filterSubmitted)
+      await p.waitForTimeout(5000)
+    } else {
+      // Fallback: JS evaluate approach for other date input patterns
+      filterSubmitted = await p.evaluate(({ dateFrom, dateTo }) => {
+        const allInputs = Array.from(document.querySelectorAll('input[type=text], input:not([type])'))
+        const dateInputs = allInputs.filter(i =>
+          /\d{2}\.\d{2}\.\d{4}/.test(i.value) || (i.placeholder||'').toLowerCase().includes('дата') ||
+          i.className.includes('z-datebox') || (i.closest && i.closest('.z-datebox'))
+        )
+        if (dateInputs.length >= 2) {
+          const set = (el, val) => {
+            Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(el, val)
+            el.dispatchEvent(new Event('input',{bubbles:true}))
+            el.dispatchEvent(new Event('change',{bubbles:true}))
+            el.dispatchEvent(new Event('blur',{bubbles:true}))
+          }
+          set(dateInputs[0], dateFrom)
+          set(dateInputs[1], dateTo)
+          return `js-set: ${dateFrom} -> ${dateTo}`
+        }
+        return 'no date inputs'
+      }, { dateFrom, dateTo })
+      await p.waitForTimeout(5000)
     }
-    const from90 = new Date(today - 90*86400000)
-    const dateFrom = fmt(from90)
-    const dateTo   = fmt(today)
+  } catch (e) {
+    console.log('[zk] Date fill error:', e.message)
+    filterSubmitted = `error: ${e.message}`
+  }
 
-    // Find date inputs (ZK renders them as input[type=text] with date format hints)
-    const allInputs = Array.from(document.querySelectorAll('input[type=text], input:not([type])'))
-    const dateInputs = allInputs.filter(i => {
-      const v = i.value || ''
-      const ph = (i.placeholder || '').toLowerCase()
-      return /\d{2}\.\d{2}\.\d{4}/.test(v) || ph.includes('дата') || ph.includes('date') ||
-             i.className.includes('z-datebox') || (i.closest && i.closest('.z-datebox'))
-    })
-    console.log('Date inputs found:', dateInputs.length)
-
-    if (dateInputs.length >= 2) {
-      // Set from-date and to-date
-      const setVal = (el, val) => {
-        const nativeInput = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
-        nativeInput.set.call(el, val)
-        el.dispatchEvent(new Event('input', { bubbles: true }))
-        el.dispatchEvent(new Event('change', { bubbles: true }))
-        el.dispatchEvent(new Event('blur', { bubbles: true }))
-      }
-      setVal(dateInputs[0], dateFrom)
-      setVal(dateInputs[1], dateTo)
-    }
-
-    // Look for "Показать", "Найти", "OK" buttons in the filter area
-    const btnTexts = ['Показать', 'Найти', 'Применить', 'OK', 'Поиск']
-    for (const btn of document.querySelectorAll('button, a.z-button, td.z-button')) {
+  // Try to click any search/apply button (page may or may not have one)
+  const btnClicked = await p.evaluate(() => {
+    const btnTexts = ['Показать', 'Найти', 'Применить', 'Поиск', 'Искать']
+    for (const btn of document.querySelectorAll('button, .z-button, a.z-button, td.z-button, .z-toolbarbutton')) {
       const t = btn.textContent.trim()
-      if (btnTexts.some(b => t === b || t.startsWith(b))) {
-        btn.click()
-        return `clicked: ${t}`
-      }
+      if (btnTexts.some(b => t.includes(b))) { btn.click(); return `clicked: ${t}` }
     }
-    // Try ZK button classes
-    for (const btn of document.querySelectorAll('.z-button')) {
-      const t = btn.textContent.trim()
-      if (btnTexts.some(b => t.includes(b))) {
-        btn.click()
-        return `zk-clicked: ${t}`
-      }
-    }
-    return 'no filter button found'
+    return null
   })
-  console.log('[zk] filter submit result:', filterSubmitted)
+  console.log('[zk] filter result:', filterSubmitted, '| btn:', btnClicked)
   await p.waitForTimeout(6000)
 
   const extractPaymentRows = () => {
@@ -764,34 +769,22 @@ async function getPaymentsDebug(username, password) {
 
   const pageTextBefore = await p.evaluate(() => document.body.innerText.substring(0, 1500))
 
-  // Try to submit the date filter
-  const filterResult = await p.evaluate(() => {
-    const today = new Date()
-    const fmt = (d) => `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`
-    const dateFrom = fmt(new Date(today - 90*86400000))
-    const dateTo = fmt(today)
-
-    const inputs = Array.from(document.querySelectorAll('input[type=text], input:not([type])'))
-    const dateInputs = inputs.filter(i => /\d{2}\.\d{2}\.\d{4}/.test(i.value) ||
-      (i.placeholder||'').toLowerCase().includes('дата'))
-    if (dateInputs.length >= 2) {
-      const setVal = (el, val) => {
-        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(el, val)
-        el.dispatchEvent(new Event('input',{bubbles:true}))
-        el.dispatchEvent(new Event('change',{bubbles:true}))
-        el.dispatchEvent(new Event('blur',{bubbles:true}))
-      }
-      setVal(dateInputs[0], dateFrom)
-      setVal(dateInputs[1], dateTo)
+  // Fill date inputs via Playwright native fill (proper ZK event chain)
+  const today2 = new Date()
+  const fmt2 = (d) => `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`
+  const dbgDateFrom = fmt2(new Date(today2 - 90*86400000))
+  const dbgDateTo = fmt2(today2)
+  let filterResult = 'no date inputs'
+  try {
+    const dbgInputs = p.locator('input.z-dateboxwrap-input')
+    const dbgCount = await dbgInputs.count()
+    if (dbgCount >= 2) {
+      await dbgInputs.first().click(); await dbgInputs.first().fill(dbgDateFrom); await dbgInputs.first().press('Tab')
+      await p.waitForTimeout(300)
+      await dbgInputs.nth(1).click(); await dbgInputs.nth(1).fill(dbgDateTo); await dbgInputs.nth(1).press('Enter')
+      filterResult = `playwright-fill: ${dbgDateFrom}->${dbgDateTo}`
     }
-    for (const btn of document.querySelectorAll('button, .z-button, a.z-button')) {
-      const t = btn.textContent.trim()
-      if (['Показать','Найти','Применить','OK','Поиск'].some(b => t.startsWith(b))) {
-        btn.click(); return `clicked: ${t}`
-      }
-    }
-    return `no btn, dateInputs: ${dateInputs.length}`
-  })
+  } catch (e) { filterResult = `error: ${e.message}` }
   await p.waitForTimeout(7000)
 
   const pageTextAfter = await p.evaluate(() => document.body.innerText.substring(0, 2000))
@@ -835,7 +828,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v4', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,800), allInputs, allButtons, rows, domSearch }
+  return { version: 'v5', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,800), allInputs, allButtons, rows, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
