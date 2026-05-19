@@ -817,14 +817,17 @@ async function getPaymentsDebug(username, password) {
   filterResult = `${filterResult}|btn:${showClicked}`
   await p.waitForTimeout(7000)
 
-  // Try clicking the first statement row (z-listitem with a date) to see if it opens
-  // a detail view with individual transactions (debit/credit amounts)
+  // Click the first STATEMENT row (must have 20-digit account number + date).
+  // Using this specificity avoids accidentally clicking news/nav z-listitem rows.
   const rowClicked = await p.evaluate(() => {
     const rows = Array.from(document.querySelectorAll('tr.z-listitem'))
-    const dateRow = rows.find(r => /\d{2}\.\d{2}\.\d{4}/.test(r.textContent))
-    if (!dateRow) return null
-    dateRow.click()
-    return (dateRow.textContent || '').trim().substring(0, 100)
+    const stmtRow = rows.find(r => {
+      const t = r.textContent || ''
+      return /\d{20}/.test(t) && /\d{2}\.\d{2}\.\d{4}/.test(t)
+    })
+    if (!stmtRow) return null
+    stmtRow.click()
+    return (stmtRow.textContent || '').trim().substring(0, 100)
   })
   filterResult = `${filterResult}|row:${rowClicked ? 'clicked' : 'null'}`
   if (rowClicked) {
@@ -892,7 +895,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v10', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,1000), allInputs, allButtons, rows, dateRowsHtml, domSearch }
+  return { version: 'v11', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,1500), allInputs, allButtons, rows, dateRowsHtml, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
