@@ -31,7 +31,11 @@ async function ensureLoggedIn(username, password) {
 
   console.log('[browser] Logging in...')
   const b = await getBrowser()
-  const ctx = await b.newContext({ ignoreHTTPSErrors: true })
+  const ctx = await b.newContext({
+    ignoreHTTPSErrors: true,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 900 },
+  })
   page = await ctx.newPage()
 
   await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
