@@ -3,7 +3,8 @@ const { chromium } = require('playwright-chromium')
 let browser = null
 let page = null
 let sessionExpiry = 0
-let cachedAccounts = []  // shared between accounts and payments calls
+let cachedAccounts = []          // last successful accounts fetch
+let cachedApiResponses = []      // all JSON API responses from last full navigation
 
 const BASE = 'https://dbo.centrinvest.ru/sbns-web'
 const LOGIN_URL = `${BASE}/ru/html/login.html`
@@ -70,9 +71,10 @@ async function getAccountsData(username, password) {
   }
 }
 
-// New interface: listen to REST API responses made by Chromium (no Node.js TLS involved)
+// New interface: listen to ALL REST API responses during full navigation
+// This function is authoritative — it also populates cachedApiResponses for payments
 async function getAccountsViaResponseListener(p) {
-  console.log('[browser] Listening to REST API responses...')
+  console.log('[browser] Full navigation with response capture, URL:', p.url())
   const apiData = []
 
   const onResponse = async (response) => {
@@ -83,9 +85,9 @@ async function getAccountsViaResponseListener(p) {
       const ct = response.headers()['content-type'] || ''
       if (!ct.includes('json')) return
       const body = await response.text()
-      if (body.length > 20) {
+      if (body.length > 10) {
         console.log('[api]', response.request().method(), url.replace('https://dbo.centrinvest.ru', ''), body.length + 'b')
-        if (body.length < 2000) console.log('[api] body:', body.substring(0, 500))
+        if (body.length < 5000) console.log('[api] body:', body.substring(0, 600))
         apiData.push({ url, body })
       }
     } catch {}
@@ -93,33 +95,43 @@ async function getAccountsViaResponseListener(p) {
 
   p.on('response', onResponse)
 
-  // Navigate through new interface to trigger account-loading API calls
-  try {
-    await p.click('text=Счета и платежи', { timeout: 5000 })
+  // Navigate to accounts/statement section (known to work)
+  try { await p.click('text=Счета и платежи', { timeout: 5000 }); await p.waitForTimeout(3000) } catch {}
+  try { await p.click('text=Выписка', { timeout: 3000 }); await p.waitForTimeout(3000) } catch {}
+
+  // Also click on first account row to trigger its transaction API calls
+  const clickedAccount = await p.evaluate(() => {
+    const rows = document.querySelectorAll('tr, [class*="row"], [class*="item"], li')
+    for (const row of rows) {
+      if (/\d{5}[.\d]{15,}/.test(row.textContent || '')) {
+        row.click()
+        return (row.textContent || '').trim().substring(0, 60)
+      }
+    }
+    return null
+  })
+  if (clickedAccount) {
+    console.log('[browser] Clicked account:', clickedAccount)
     await p.waitForTimeout(3000)
-  } catch {}
-  try {
-    await p.click('text=Выписка', { timeout: 3000 })
-    await p.waitForTimeout(3000)
-  } catch {}
+  }
 
   p.off('response', onResponse)
+  console.log('[browser] Captured', apiData.length, 'API responses total')
 
-  console.log('[browser] Captured', apiData.length, 'API responses')
+  // Save for payments endpoint to reuse
+  cachedApiResponses = apiData
 
-  // Parse account numbers from captured responses
+  // Parse account numbers
   const accounts = []
   const seen = new Set()
   for (const { url, body } of apiData) {
     try {
-      // Look for 20-digit account numbers
       const nums = body.match(/\d{20}/g) || []
       const dotNums = body.match(/\d{5}\.\d{3}\.\d\.\d{11}/g) || []
       dotNums.forEach(n => nums.push(n.replace(/\./g, '')))
       nums.forEach(n => {
         if (!seen.has(n)) {
           seen.add(n)
-          // Try to parse balance from JSON
           let balance = 0, currency = 'RUR', status = 'Открыт'
           try {
             const parsed = JSON.parse(body)
@@ -127,8 +139,7 @@ async function getAccountsViaResponseListener(p) {
               if (!obj || typeof obj !== 'object') return undefined
               if (obj[key] !== undefined) return obj[key]
               for (const v of Object.values(obj)) {
-                const r = find(v, key)
-                if (r !== undefined) return r
+                const r = find(v, key); if (r !== undefined) return r
               }
             }
             balance = parseFloat(find(parsed, 'balance') || find(parsed, 'остаток') || 0) || 0
@@ -193,6 +204,52 @@ async function getAccountsClassicZK(p) {
   })
 }
 
+function extractPaymentsFromApiData(apiData) {
+  const payments = []
+  const seen = new Set()
+  const getField = (o, ...names) => {
+    for (const n of names) {
+      for (const k of Object.keys(o)) {
+        if (k.toLowerCase().includes(n.toLowerCase())) return o[k]
+      }
+    }
+    return ''
+  }
+  const scan = (obj) => {
+    if (Array.isArray(obj) && obj.length > 0 && obj.length < 2000) {
+      for (const item of obj) {
+        if (item && typeof item === 'object') {
+          const keys = Object.keys(item).map(k => k.toLowerCase())
+          const hasDate = keys.some(k => k.includes('date') || k.includes('дата') || k.includes('time'))
+          const hasAmount = keys.some(k =>
+            k.includes('amount') || k.includes('sum') || k.includes('сумм') ||
+            k.includes('debit') || k.includes('credit')
+          )
+          if (hasDate && hasAmount) {
+            const key = JSON.stringify(item).substring(0, 120)
+            if (!seen.has(key)) {
+              seen.add(key)
+              payments.push({
+                date: String(getField(item, 'date', 'дата', 'ddate', 'valueDate', 'operDate', 'docDate', 'createDate') || ''),
+                number: String(getField(item, 'number', 'num', 'docNum', 'номер', 'id', 'docId', 'docNumber') || ''),
+                recipient: String(getField(item, 'recipient', 'payee', 'beneficiary', 'контрагент', 'получатель', 'name', 'payeeName', 'counterparty') || ''),
+                amount: parseFloat(String(getField(item, 'amount', 'sum', 'summa', 'сумма', 'debit', 'credit', 'debitAmount') || '0').replace(/\s/g, '').replace(',', '.')) || 0,
+                status: String(getField(item, 'status', 'state', 'статус', 'состояние', 'docStatus') || ''),
+              })
+            }
+          }
+        }
+      }
+    } else if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      for (const v of Object.values(obj)) scan(v)
+    }
+  }
+  for (const { body } of apiData) {
+    try { scan(JSON.parse(body)) } catch {}
+  }
+  return payments
+}
+
 async function getPaymentsData(username, password) {
   const p = await ensureLoggedIn(username, password)
   const currentUrl = p.url()
@@ -204,7 +261,18 @@ async function getPaymentsData(username, password) {
 }
 
 async function getPaymentsViaResponseListener(p) {
-  console.log('[browser] Collecting payment data, current URL:', p.url())
+  console.log('[browser] Collecting payment data, URL:', p.url(), 'cached responses:', cachedApiResponses.length)
+
+  // Payments can reuse the captured responses from the accounts navigation.
+  // Attempt extraction from cached data first.
+  if (cachedApiResponses.length > 0) {
+    const fast = extractPaymentsFromApiData(cachedApiResponses)
+    if (fast.length > 0) {
+      console.log('[browser] Got', fast.length, 'payments from cached API responses')
+      return fast
+    }
+    console.log('[browser] Cached responses had no payment data, doing fresh navigation')
+  }
   const apiData = []
 
   const onResponse = async (response) => {
@@ -310,54 +378,13 @@ async function getPaymentsViaResponseListener(p) {
   p.off('response', onResponse)
   console.log('[browser] Total tx API responses captured:', apiData.length)
 
-  const payments = []
-  const seen = new Set()
-
-  const getField = (o, ...names) => {
-    for (const n of names) {
-      for (const k of Object.keys(o)) {
-        if (k.toLowerCase().includes(n.toLowerCase())) return o[k]
-      }
-    }
-    return ''
-  }
-
-  const scanForPayments = (obj) => {
-    if (Array.isArray(obj) && obj.length > 0 && obj.length < 2000) {
-      for (const item of obj) {
-        if (item && typeof item === 'object') {
-          const keys = Object.keys(item).map(k => k.toLowerCase())
-          const hasDate = keys.some(k => k.includes('date') || k.includes('дата') || k.includes('time'))
-          const hasAmount = keys.some(k => k.includes('amount') || k.includes('sum') || k.includes('сумм') || k.includes('debit') || k.includes('credit'))
-          if (hasDate && hasAmount) {
-            const key = JSON.stringify(item).substring(0, 120)
-            if (!seen.has(key)) {
-              seen.add(key)
-              payments.push({
-                date: String(getField(item, 'date', 'дата', 'ddate', 'valueDate', 'operDate', 'docDate', 'createDate') || ''),
-                number: String(getField(item, 'number', 'num', 'docNum', 'номер', 'id', 'docId', 'docNumber') || ''),
-                recipient: String(getField(item, 'recipient', 'payee', 'beneficiary', 'контрагент', 'получатель', 'name', 'payeeName', 'counterparty') || ''),
-                amount: parseFloat(String(getField(item, 'amount', 'sum', 'summa', 'сумма', 'debit', 'credit', 'debitAmount') || '0').replace(/\s/g, '').replace(',', '.')) || 0,
-                status: String(getField(item, 'status', 'state', 'статус', 'состояние', 'docStatus') || ''),
-              })
-            }
-          }
-        }
-      }
-    } else if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-      for (const v of Object.values(obj)) scanForPayments(v)
-    }
-  }
-
-  for (const { url, body } of apiData) {
-    try { scanForPayments(JSON.parse(body)) } catch {}
-  }
+  const payments = extractPaymentsFromApiData(apiData)
 
   if (payments.length === 0) {
     const bodyText = await p.evaluate(() => document.body.innerText)
     console.log('[browser] No payments. Page text:', bodyText.substring(0, 600))
     for (const { url, body } of apiData) {
-      console.log('[browser] Had response', url.replace(origin, ''), ':', body.substring(0, 200))
+      console.log('[browser] Had response', url.replace('https://dbo.centrinvest.ru', ''), ':', body.substring(0, 200))
     }
   }
   console.log('[browser] Found payments:', payments.length)
@@ -421,6 +448,13 @@ async function getNavDebug(username, password) {
   const p = await ensureLoggedIn(username, password)
   const currentUrl = p.url()
 
+  // Show already-cached API responses
+  const cachedUrls = cachedApiResponses.map(r => ({
+    url: r.url.replace('https://dbo.centrinvest.ru', ''),
+    len: r.body.length,
+    preview: r.body.substring(0, 200),
+  }))
+
   // Dump full nav structure + all page text
   const navItems = await p.evaluate(() => {
     const out = []
@@ -458,7 +492,7 @@ async function getNavDebug(username, password) {
     }
   }
 
-  return { currentUrl, navItems, pageText, directResults }
+  return { currentUrl, cachedUrls, navItems, pageText, directResults }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getWhoAmI, getNavDebug, closeBrowser }
