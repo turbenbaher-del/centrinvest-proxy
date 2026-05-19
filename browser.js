@@ -81,77 +81,61 @@ async function getAccountsData(username, password) {
 }
 
 async function getAccountsNewInterface(p) {
-  console.log('[browser] Using new interface to get accounts')
+  console.log('[browser] Using new interface to get accounts via API interception')
 
-  // Click "Счета и платежи" in the sidebar
+  // Intercept REST API responses to capture accounts data
+  const capturedAccounts = []
+
+  await p.route('**/*', async (route, request) => {
+    const url = request.url()
+    const response = await route.fetch()
+    // Log API calls that might have account data
+    if (url.includes('/api') || url.includes('/account') || url.includes('/balance')) {
+      try {
+        const body = await response.text()
+        if (body.includes('balance') || body.includes('account') || body.includes('number')) {
+          console.log('[api]', request.method(), url.replace('https://dbo.centrinvest.ru', ''))
+          // Look for 20-digit numbers in API responses
+          const nums = body.match(/\d{20}/g)
+          if (nums) {
+            console.log('[api] found numbers:', nums.slice(0, 5))
+            nums.forEach(n => capturedAccounts.push(n))
+          }
+          if (body.length < 3000) console.log('[api] body:', body.substring(0, 500))
+        }
+      } catch {}
+    }
+    route.fulfill({ response })
+  })
+
+  // Navigate through sections to trigger API calls
   try {
     await p.click('text=Счета и платежи', { timeout: 5000 })
-    console.log('[browser] Clicked Счета и платежи')
     await p.waitForTimeout(3000)
-  } catch (e) {
-    console.log('[browser] Could not click menu:', e.message)
+  } catch {}
+
+  try {
+    await p.click('text=Выписка', { timeout: 3000 })
+    await p.waitForTimeout(3000)
+  } catch {}
+
+  await p.unroute('**/*')
+
+  console.log('[browser] Captured account numbers:', capturedAccounts)
+
+  if (capturedAccounts.length > 0) {
+    const seen = new Set()
+    return capturedAccounts
+      .filter(n => { if (seen.has(n)) return false; seen.add(n); return true })
+      .map(number => ({ number, currency: 'RUR', balance: 0, status: 'Открыт' }))
   }
 
-  // Poll for account numbers (dotted format or plain 20-digit)
-  let accounts = []
-  for (let attempt = 0; attempt < 8; attempt++) {
-    await p.waitForTimeout(2500)
+  // Fallback: scrape DOM
+  const bodyText = await p.evaluate(() => document.body.innerText)
+  console.log('[browser] URL:', p.url())
+  console.log('[browser] Page text (2000):', bodyText.substring(0, 2000))
 
-    const result = await p.evaluate(() => {
-      const results = []
-      const seen = new Set()
-
-      // Look for all text nodes / elements that could contain account numbers
-      document.querySelectorAll('*').forEach(el => {
-        if (el.children.length > 3) return // skip containers
-        const text = el.textContent.trim()
-        const stripped = text.replace(/[\.\s]/g, '')
-        if (stripped.match(/^\d{20}$/) && !seen.has(stripped)) {
-          seen.add(stripped)
-          // Try to get balance from nearby elements
-          const parent = el.closest('[class]') || el.parentElement
-          const parentText = parent ? parent.innerText : ''
-          results.push({ number: stripped, raw: text, context: parentText.substring(0, 200) })
-        }
-      })
-
-      // Also look in full text for dotted account pattern
-      const bodyText = document.body.innerText
-      const dotPattern = /\b(\d{5})\.(\d{3})\.(\d)\.(\d{11})\b/g
-      let m
-      while ((m = dotPattern.exec(bodyText)) !== null) {
-        const num = m[1] + m[2] + m[3] + m[4]
-        if (!seen.has(num)) {
-          seen.add(num)
-          results.push({ number: num, raw: m[0], context: bodyText.substring(Math.max(0, m.index - 100), m.index + 200) })
-        }
-      }
-
-      return results
-    })
-
-    if (result.length > 0) {
-      accounts = result
-      break
-    }
-    console.log(`[browser] Attempt ${attempt + 1}: no accounts yet`)
-  }
-
-  if (accounts.length === 0) {
-    const bodyText = await p.evaluate(() => document.body.innerText)
-    console.log('[browser] URL after nav:', p.url())
-    console.log('[browser] Page text (2000):', bodyText.substring(0, 2000))
-  }
-
-  console.log('[browser] Found accounts:', accounts.length, accounts.map(a => a.number))
-
-  return accounts.map(a => {
-    const balMatch = a.context.match(/(\d[\d\s]*[,\.]\d{2})\s*[₽$€]/)
-    const balance = balMatch ? parseFloat(balMatch[1].replace(/\s/g, '').replace(',', '.')) : 0
-    const currency = a.context.includes('USD') ? 'USD' : a.context.includes('EUR') ? 'EUR' : 'RUR'
-    const status = a.context.match(/Открыт|Закрыт|Заблокирован/)?.[0] || 'Открыт'
-    return { number: a.number, currency, balance, status }
-  })
+  return []
 }
 
 async function getAccountsClassicInterface(p) {
