@@ -49,7 +49,7 @@ async function ensureLoggedIn(username, password) {
   await page.fill('#password', password)
   await page.click('#submitButton')
 
-  await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 20000 })
+  await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 25000, waitUntil: 'domcontentloaded' })
   await page.waitForTimeout(2000)
 
   console.log('[browser] Logged in, URL:', page.url())
