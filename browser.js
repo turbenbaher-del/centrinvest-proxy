@@ -394,29 +394,65 @@ async function getPaymentsViaResponseListener(p) {
 async function getPaymentsClassicZK(p) {
   console.log('[zk] Starting payments navigation')
 
-  // ZK submenu items are already visible as a.z-menuitemwrap-content —
-  // no need to first click the parent "ПЛАТЕЖНЫЕ ДОКУМЕНТЫ" (different class).
-  const zkClickDirect = async (label) => {
-    const sel = 'a.z-menuitemwrap-content, span.z-menuitemwrap-content, td.z-menuitemwrap-content'
+  // ZK submenus are hidden via CSS until parent menu item is hovered.
+  // Use 4 methods in order: standard click → hover-parent+click → force click → JS DOM click.
+  const zkClickMenu = async (label) => {
+    const subSel = 'a.z-menuitemwrap-content, span.z-menuitemwrap-content, td.z-menuitemwrap-content, a.z-menuitem-content'
+
+    // 1. Standard Playwright click (works if item is already visible)
     try {
-      const el = p.locator(sel).filter({ hasText: label }).first()
-      await el.click({ timeout: 5000 })
+      await p.locator(subSel).filter({ hasText: label }).first().click({ timeout: 3000 })
       await p.waitForTimeout(7000)
-      console.log(`[zk] clicked: ${label}`)
+      console.log(`[zk] std-clicked: ${label}`)
       return true
     } catch {}
+
+    // 2. Hover over each top-level nav item to open its submenu, then click
+    const parents = ['ПЛАТЕЖНЫЕ ДОКУМЕНТЫ', 'ПИСЬМА', 'АНАЛИТИКА', 'ВАЛЮТНЫЕ ОПЕРАЦИИ', 'ПРОДУКТЫ И УСЛУГИ', 'СЧЕТА']
+    for (const parent of parents) {
+      try {
+        await p.locator(`text="${parent}"`).first().hover({ timeout: 2000 })
+        await p.waitForTimeout(600)
+        const el = p.locator(subSel).filter({ hasText: label }).first()
+        if (await el.isVisible().catch(() => false)) {
+          await el.click({ timeout: 2000 })
+          await p.waitForTimeout(7000)
+          console.log(`[zk] hover(${parent})->clicked: ${label}`)
+          return true
+        }
+      } catch {}
+    }
+
+    // 3. Playwright force click (bypasses actionability checks, fires pointer events)
     try {
-      await p.click(`text="${label}"`, { timeout: 4000 })
+      await p.locator(subSel).filter({ hasText: label }).first().click({ force: true, timeout: 3000 })
       await p.waitForTimeout(7000)
-      console.log(`[zk] text-clicked: ${label}`)
+      console.log(`[zk] force-clicked: ${label}`)
       return true
     } catch {}
+
+    // 4. Pure JS click — finds element in DOM regardless of CSS visibility
+    const clicked = await p.evaluate((label) => {
+      for (const el of document.querySelectorAll('a, span, td, div, li')) {
+        if (el.textContent.trim() === label) {
+          el.click()
+          return `${el.tagName}.${(el.className || '').substring(0, 50)}`
+        }
+      }
+      return null
+    }, label)
+    if (clicked) {
+      console.log(`[zk] js-clicked: ${label} => ${clicked}`)
+      await p.waitForTimeout(7000)
+      return true
+    }
+
     return false
   }
 
   // Try "История операций" first (shows all ops), fall back to "Исходящие документы"
-  let navigated = await zkClickDirect('История операций')
-  if (!navigated) navigated = await zkClickDirect('Исходящие документы')
+  let navigated = await zkClickMenu('История операций')
+  if (!navigated) navigated = await zkClickMenu('Исходящие документы')
   console.log('[zk] navigated:', navigated)
 
   const afterText = await p.evaluate(() => document.body.innerText.substring(0, 800))
@@ -670,16 +706,38 @@ async function getPaymentsDebug(username, password) {
   const p = await ensureLoggedIn(username, password)
   console.log('[debug] Current URL:', p.url())
 
-  const sel = 'a.z-menuitemwrap-content, span.z-menuitemwrap-content, td.z-menuitemwrap-content'
+  const subSel = 'a.z-menuitemwrap-content, span.z-menuitemwrap-content, td.z-menuitemwrap-content, a.z-menuitem-content'
   let clickedLabel = null
   for (const label of ['История операций', 'Исходящие документы']) {
+    // Try standard click first, then hover parents, then JS force-click
+    let done = false
     try {
-      const el = p.locator(sel).filter({ hasText: label }).first()
-      await el.click({ timeout: 5000 })
-      await p.waitForTimeout(7000)
-      clickedLabel = label
-      break
+      await p.locator(subSel).filter({ hasText: label }).first().click({ timeout: 3000 })
+      await p.waitForTimeout(7000); done = true
     } catch {}
+    if (!done) {
+      for (const parent of ['ПЛАТЕЖНЫЕ ДОКУМЕНТЫ', 'ПИСЬМА', 'АНАЛИТИКА', 'ВАЛЮТНЫЕ ОПЕРАЦИИ', 'ПРОДУКТЫ И УСЛУГИ']) {
+        try {
+          await p.locator(`text="${parent}"`).first().hover({ timeout: 2000 })
+          await p.waitForTimeout(500)
+          const el = p.locator(subSel).filter({ hasText: label }).first()
+          if (await el.isVisible().catch(() => false)) {
+            await el.click({ timeout: 2000 })
+            await p.waitForTimeout(7000); done = true; break
+          }
+        } catch {}
+      }
+    }
+    if (!done) {
+      const clicked = await p.evaluate((label) => {
+        for (const el of document.querySelectorAll('a, span, td, div, li')) {
+          if (el.textContent.trim() === label) { el.click(); return el.tagName }
+        }
+        return null
+      }, label)
+      if (clicked) { await p.waitForTimeout(7000); done = true }
+    }
+    if (done) { clickedLabel = label; break }
   }
 
   const pageTextBefore = await p.evaluate(() => document.body.innerText.substring(0, 1500))
