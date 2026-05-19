@@ -788,7 +788,32 @@ async function getPaymentsDebug(username, password) {
     return out.slice(0, 40)
   })
 
-  return { clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter, allInputs, allButtons, rows }
+  // Inspect DOM for target labels — help diagnose why click fails
+  const domSearch = await p.evaluate(() => {
+    const targets = ['История операций', 'Исходящие документы']
+    const results = {}
+    for (const label of targets) {
+      const found = []
+      document.querySelectorAll('*').forEach(el => {
+        const t = (el.textContent || '').trim()
+        const own = [...(el.childNodes || [])].filter(n => n.nodeType === 3).map(n => n.textContent.trim()).join('')
+        if (own.includes(label) || t === label) {
+          found.push({
+            tag: el.tagName,
+            cls: (el.className || '').substring(0, 60),
+            text: t.substring(0, 60),
+            ownText: own.substring(0, 60),
+            vis: el.offsetParent !== null,
+            display: (window.getComputedStyle(el).display || '').substring(0, 20),
+          })
+        }
+      })
+      results[label] = found.slice(0, 6)
+    }
+    return results
+  })
+
+  return { version: 'v3', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,800), allInputs, allButtons, rows, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
