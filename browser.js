@@ -56,7 +56,14 @@ async function ensureLoggedIn(username, password) {
   await page.click('#submitButton')
 
   await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 20000 })
-  await page.waitForTimeout(3000)
+  await page.waitForTimeout(2000)
+
+  // New interface (/api-ui/) — switch back to old ZK interface
+  if (page.url().includes('/api-ui')) {
+    console.log('[browser] New interface detected, switching to classic ZK...')
+    await page.goto(MAIN_URL, { waitUntil: 'domcontentloaded', timeout: 20000 })
+    await page.waitForTimeout(2000)
+  }
 
   sessionExpiry = Date.now() + 20 * 60 * 1000
   console.log('[browser] Logged in, URL:', page.url())
