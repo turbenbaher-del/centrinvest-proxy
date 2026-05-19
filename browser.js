@@ -414,9 +414,9 @@ async function getPaymentsClassicZK(p) {
     return false
   }
 
-  // Try "Исходящие документы" first, fall back to "История операций"
-  let navigated = await zkClickDirect('Исходящие документы')
-  if (!navigated) navigated = await zkClickDirect('История операций')
+  // Try "История операций" first (shows all ops), fall back to "Исходящие документы"
+  let navigated = await zkClickDirect('История операций')
+  if (!navigated) navigated = await zkClickDirect('Исходящие документы')
   console.log('[zk] navigated:', navigated)
 
   const afterText = await p.evaluate(() => document.body.innerText.substring(0, 600))
@@ -432,26 +432,33 @@ async function getPaymentsClassicZK(p) {
           .map(td => td.textContent.trim())
           .filter(Boolean)
         if (cells.length < 3) return
-        const dateIdx = cells.findIndex(c => /^\d{2}\.\d{2}\.\d{4}$/.test(c))
+        // Accept dates with or without time: 19.05.2026 or 19.05.2026 02:25
+        const dateIdx = cells.findIndex(c => /^\d{2}\.\d{2}\.\d{4}/.test(c))
         if (dateIdx === -1) return
         if (cells.some(c =>
           c.includes('за прошлый день') || c.includes('за сегодня') ||
-          /^\d{5}\.\d{3}/.test(c) || c === 'Дата'
+          c.includes('за период') || c === 'Дата' || c === 'Дата операции' ||
+          c === 'Номер' || c === 'Сумма' || c === 'Получатель'
         )) return
-        const amtCell = cells.find(c => /^[\d\s]+[,\.]\d{2}$/.test(c))
+        // Amount: digits/spaces + comma/dot + 1-2 digits (handles "221,10" and "1 234,56")
+        const amtCell = cells.find(c => /^[\d\s]+[,\.]\d{1,2}$/.test(c.trim()))
         if (!amtCell) return
-        const key = cells.slice(0, 5).join('|')
+        const key = cells.slice(0, 4).join('|')
         if (seen.has(key)) return
         seen.add(key)
         const recipientCell = cells.find((c, i) =>
           i !== dateIdx && c.length > 3 &&
-          !/^\d+$/.test(c) &&
-          !/^\d{2}\.\d{2}\.\d{4}$/.test(c) &&
+          !/^\d{1,}$/.test(c) &&
+          !/^\d{2}\.\d{2}\.\d{4}/.test(c) &&
+          !/^\d{5}\.\d{3}/.test(c) &&
           !c.includes('за ')
         ) || ''
+        // Extract just the date part (without time)
+        const dateRaw = cells[dateIdx]
+        const dateOnly = (dateRaw.match(/\d{2}\.\d{2}\.\d{4}/) || [dateRaw])[0]
         results.push({
-          date: cells[dateIdx],
-          number: cells.find((c, i) => i > dateIdx && /^\d{3,}$/.test(c)) || '',
+          date: dateOnly,
+          number: cells.find((c, i) => i > dateIdx && /^\d{4,}$/.test(c)) || '',
           recipient: recipientCell,
           amount: parseFloat(amtCell.replace(/\s/g, '').replace(',', '.')) || 0,
           status: cells[cells.length - 1] || '',
@@ -468,7 +475,10 @@ async function getPaymentsClassicZK(p) {
 
   // If still empty, try waiting longer and re-extract
   if (payments.length === 0) {
+    console.log('[zk] No payments yet, waiting 5s more...')
     await p.waitForTimeout(5000)
+    const afterText2 = await p.evaluate(() => document.body.innerText.substring(0, 800))
+    console.log('[zk] Page after extra wait:', afterText2)
     payments = await p.evaluate(extractPaymentRows)
   }
 
@@ -597,4 +607,34 @@ async function getTemplatesData(username, password) {
   return templates
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, closeBrowser }
+async function getPaymentsDebug(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  console.log('[debug] Current URL:', p.url())
+
+  const sel = 'a.z-menuitemwrap-content, span.z-menuitemwrap-content, td.z-menuitemwrap-content'
+  let clickedLabel = null
+  for (const label of ['История операций', 'Исходящие документы']) {
+    try {
+      const el = p.locator(sel).filter({ hasText: label }).first()
+      await el.click({ timeout: 5000 })
+      await p.waitForTimeout(8000)
+      clickedLabel = label
+      console.log('[debug] Clicked:', label)
+      break
+    } catch {}
+  }
+
+  const pageText = await p.evaluate(() => document.body.innerText.substring(0, 2000))
+  const rows = await p.evaluate(() => {
+    const out = []
+    document.querySelectorAll('tr').forEach(row => {
+      const cells = Array.from(row.querySelectorAll('td')).map(td => td.textContent.trim()).filter(Boolean)
+      if (cells.length >= 2) out.push({ cls: row.className, cells: cells.slice(0, 8) })
+    })
+    return out.slice(0, 30)
+  })
+
+  return { clickedLabel, pageText, rows }
+}
+
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
