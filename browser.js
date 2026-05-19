@@ -193,6 +193,97 @@ async function getAccountsClassicZK(p) {
 
 async function getPaymentsData(username, password) {
   const p = await ensureLoggedIn(username, password)
+  const currentUrl = p.url()
+  if (currentUrl.includes('/api-ui')) {
+    return getPaymentsViaResponseListener(p)
+  } else {
+    return getPaymentsClassicZK(p)
+  }
+}
+
+async function getPaymentsViaResponseListener(p) {
+  console.log('[browser] Listening to REST API for payments...')
+  const apiData = []
+
+  const onResponse = async (response) => {
+    const url = response.url()
+    if (!url.includes('centrinvest.ru')) return
+    if (response.status() !== 200) return
+    try {
+      const ct = response.headers()['content-type'] || ''
+      if (!ct.includes('json')) return
+      const body = await response.text()
+      if (body.length > 20) {
+        console.log('[api pay]', response.request().method(), url.replace('https://dbo.centrinvest.ru', ''), body.length + 'b')
+        apiData.push({ url, body })
+      }
+    } catch {}
+  }
+
+  p.on('response', onResponse)
+
+  const clickTargets = ['text=Платежи', 'text=Счета и платежи', 'text=Платёжные документы',
+    'text=Платежные документы', 'text=История', 'text=Исходящие']
+  for (const t of clickTargets) {
+    try { await p.click(t, { timeout: 3000 }); await p.waitForTimeout(2000) } catch {}
+  }
+
+  p.off('response', onResponse)
+  console.log('[browser] Captured', apiData.length, 'payment API responses')
+
+  const payments = []
+  const seen = new Set()
+
+  for (const { url, body } of apiData) {
+    try {
+      const parsed = JSON.parse(body)
+      const scanForPayments = (obj) => {
+        if (Array.isArray(obj)) {
+          for (const item of obj) {
+            if (item && typeof item === 'object') {
+              const keys = Object.keys(item).map(k => k.toLowerCase())
+              const hasDate = keys.some(k => k.includes('date') || k.includes('дата'))
+              const hasAmount = keys.some(k => k.includes('amount') || k.includes('sum') || k.includes('сумм'))
+              if (hasDate && hasAmount) {
+                const key = JSON.stringify(item)
+                if (!seen.has(key)) {
+                  seen.add(key)
+                  const getField = (o, ...names) => {
+                    for (const n of names) {
+                      for (const k of Object.keys(o)) {
+                        if (k.toLowerCase().includes(n.toLowerCase())) return o[k]
+                      }
+                    }
+                    return ''
+                  }
+                  payments.push({
+                    date: String(getField(item, 'date', 'дата', 'ddate', 'valueDate', 'operDate') || ''),
+                    number: String(getField(item, 'number', 'num', 'docNum', 'номер', 'id', 'docId') || ''),
+                    recipient: String(getField(item, 'recipient', 'payee', 'beneficiary', 'контрагент', 'получатель', 'name', 'payeeName') || ''),
+                    amount: parseFloat(String(getField(item, 'amount', 'sum', 'summa', 'сумма', 'debit', 'credit') || '0').replace(/\s/g, '').replace(',', '.')) || 0,
+                    status: String(getField(item, 'status', 'state', 'статус', 'состояние') || ''),
+                  })
+                }
+              }
+            }
+          }
+        } else if (obj && typeof obj === 'object') {
+          for (const v of Object.values(obj)) scanForPayments(v)
+        }
+      }
+      scanForPayments(parsed)
+    } catch {}
+  }
+
+  if (payments.length === 0) {
+    const bodyText = await p.evaluate(() => document.body.innerText)
+    console.log('[browser] No payments found. Page text:', bodyText.substring(0, 400))
+  }
+  console.log('[browser] Found payments:', payments.length)
+  return payments
+}
+
+async function getPaymentsClassicZK(p) {
   try {
     await p.click('text=ПЛАТЕЖНЫЕ ДОКУМЕНТЫ', { timeout: 5000 })
     await p.waitForTimeout(3000)
@@ -217,11 +308,19 @@ async function getPaymentsData(username, password) {
 async function getWhoAmI(username, password) {
   const p = await ensureLoggedIn(username, password)
   const name = await p.evaluate(() => {
+    // Check common profile selectors first
+    for (const sel of ['.user-name', '.profile-name', '[data-testid="user-name"]', '.header-user', '.navbar-user']) {
+      const el = document.querySelector(sel)
+      if (el) { const t = el.textContent.trim(); if (t.length > 5) return t }
+    }
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
     let node
     while ((node = walker.nextNode())) {
       const t = node.textContent.trim()
+      // All-caps: ПОПЕНКОВ СЕРГЕЙ ВАСИЛЬЕВИЧ
       if (t.match(/^[А-ЯЁ][А-ЯЁ\s]{10,}[А-ЯЁ]$/) && t.split(' ').length === 3) return t
+      // Mixed-case: Попенков Сергей Васильевич
+      if (t.match(/^[А-ЯЁ][а-яё]{2,}\s[А-ЯЁ][а-яё]{2,}\s[А-ЯЁ][а-яё]{2,}$/) && t.split(' ').length === 3) return t
     }
     return null
   })
