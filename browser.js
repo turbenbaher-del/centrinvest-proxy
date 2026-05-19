@@ -728,7 +728,10 @@ async function getTemplatesData(username, password) {
 
 async function getPaymentsDebug(username, password) {
   const p = await ensureLoggedIn(username, password)
-  console.log('[debug] Current URL:', p.url())
+  // Always reset to main page to avoid stale state from previous debug runs
+  await p.goto(MAIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await p.waitForTimeout(3000)
+  console.log('[debug] Reset to:', p.url())
 
   const subSel = 'a.z-menuitemwrap-content, span.z-menuitemwrap-content, td.z-menuitemwrap-content, a.z-menuitem-content'
   let clickedLabel = null
@@ -832,8 +835,20 @@ async function getPaymentsDebug(username, password) {
   filterResult = `${filterResult}|row:${rowClicked ? 'clicked' : 'null'}`
   if (rowClicked) {
     console.log('[dbg] Clicked statement row:', rowClicked)
-    await p.waitForTimeout(8000)
+    await p.waitForTimeout(10000)
   }
+
+  // After row click: look for any popup/detail window that appeared
+  const popupText = await p.evaluate(() => {
+    const detailSelectors = ['.z-window', '.z-popup', '[class*="z-detail"]', '[class*="z-panel"]']
+    for (const sel of detailSelectors) {
+      const el = document.querySelector(sel)
+      if (el && el.offsetParent !== null) {
+        return { sel, text: (el.textContent || '').trim().substring(0, 800) }
+      }
+    }
+    return null
+  })
 
   const pageTextAfter = await p.evaluate(() => document.body.innerText.substring(0, 2000))
   const allInputs = await p.evaluate(() =>
@@ -895,7 +910,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v11', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,1500), allInputs, allButtons, rows, dateRowsHtml, domSearch }
+  return { version: 'v12', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,3000), popupText, allInputs, allButtons, rows, dateRowsHtml, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
