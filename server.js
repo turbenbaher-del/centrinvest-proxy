@@ -1,6 +1,6 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getWhoAmI, getNavDebug, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, closeBrowser } = require('./browser')
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -45,6 +45,16 @@ app.get('/api/payments', async (req, res) => {
     res.json({ success: true, data })
   } catch (err) {
     console.error('[payments]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+app.get('/api/templates', async (req, res) => {
+  try {
+    const data = await getTemplatesData(USERNAME, PASSWORD)
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[templates]', err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })

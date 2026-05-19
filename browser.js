@@ -392,24 +392,87 @@ async function getPaymentsViaResponseListener(p) {
 }
 
 async function getPaymentsClassicZK(p) {
-  try {
-    await p.click('text=ПЛАТЕЖНЫЕ ДОКУМЕНТЫ', { timeout: 5000 })
-    await p.waitForTimeout(3000)
-  } catch {}
-  const payments = await p.evaluate(() => {
+  console.log('[zk] Starting payments navigation')
+
+  // ZK submenu items are already visible as a.z-menuitemwrap-content —
+  // no need to first click the parent "ПЛАТЕЖНЫЕ ДОКУМЕНТЫ" (different class).
+  const zkClickDirect = async (label) => {
+    const sel = 'a.z-menuitemwrap-content, span.z-menuitemwrap-content, td.z-menuitemwrap-content'
+    try {
+      const el = p.locator(sel).filter({ hasText: label }).first()
+      await el.click({ timeout: 5000 })
+      await p.waitForTimeout(7000)
+      console.log(`[zk] clicked: ${label}`)
+      return true
+    } catch {}
+    try {
+      await p.click(`text="${label}"`, { timeout: 4000 })
+      await p.waitForTimeout(7000)
+      console.log(`[zk] text-clicked: ${label}`)
+      return true
+    } catch {}
+    return false
+  }
+
+  // Try "Исходящие документы" first, fall back to "История операций"
+  let navigated = await zkClickDirect('Исходящие документы')
+  if (!navigated) navigated = await zkClickDirect('История операций')
+  console.log('[zk] navigated:', navigated)
+
+  const afterText = await p.evaluate(() => document.body.innerText.substring(0, 600))
+  console.log('[zk] Page after nav:', afterText)
+
+  const extractPaymentRows = () => {
     const results = []
-    document.querySelectorAll('tr').forEach(row => {
-      const cells = Array.from(row.querySelectorAll('td')).map(c => c.textContent.trim())
-      if (cells.length >= 3 && cells[0].match(/\d{2}\.\d{2}\.\d{4}/)) {
+    const seen = new Set()
+
+    const processRows = (selector) => {
+      document.querySelectorAll(selector).forEach(row => {
+        const cells = Array.from(row.querySelectorAll('td'))
+          .map(td => td.textContent.trim())
+          .filter(Boolean)
+        if (cells.length < 3) return
+        const dateIdx = cells.findIndex(c => /^\d{2}\.\d{2}\.\d{4}$/.test(c))
+        if (dateIdx === -1) return
+        if (cells.some(c =>
+          c.includes('за прошлый день') || c.includes('за сегодня') ||
+          /^\d{5}\.\d{3}/.test(c) || c === 'Дата'
+        )) return
+        const amtCell = cells.find(c => /^[\d\s]+[,\.]\d{2}$/.test(c))
+        if (!amtCell) return
+        const key = cells.slice(0, 5).join('|')
+        if (seen.has(key)) return
+        seen.add(key)
+        const recipientCell = cells.find((c, i) =>
+          i !== dateIdx && c.length > 3 &&
+          !/^\d+$/.test(c) &&
+          !/^\d{2}\.\d{2}\.\d{4}$/.test(c) &&
+          !c.includes('за ')
+        ) || ''
         results.push({
-          date: cells[0], number: cells[1] || '', recipient: cells[2] || '',
-          amount: parseFloat((cells[3] || '0').replace(/\s/g, '').replace(',', '.')) || 0,
-          status: cells[4] || '',
+          date: cells[dateIdx],
+          number: cells.find((c, i) => i > dateIdx && /^\d{3,}$/.test(c)) || '',
+          recipient: recipientCell,
+          amount: parseFloat(amtCell.replace(/\s/g, '').replace(',', '.')) || 0,
+          status: cells[cells.length - 1] || '',
         })
-      }
-    })
+      })
+    }
+
+    processRows('tr.z-listitem, tr.z-row, tr[class*="listitem"], tr[class*="z-list"]')
+    if (results.length === 0) processRows('tr')
     return results
-  })
+  }
+
+  let payments = await p.evaluate(extractPaymentRows)
+
+  // If still empty, try waiting longer and re-extract
+  if (payments.length === 0) {
+    await p.waitForTimeout(5000)
+    payments = await p.evaluate(extractPaymentRows)
+  }
+
+  console.log('[zk] Payments found:', payments.length, payments.slice(0, 3))
   return payments
 }
 
@@ -495,4 +558,43 @@ async function getNavDebug(username, password) {
   return { currentUrl, cachedUrls, navItems, pageText, directResults }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getWhoAmI, getNavDebug, closeBrowser }
+async function getTemplatesData(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  console.log('[zk] Getting templates')
+
+  // "Корреспонденты" is in Справочники submenu — these are payment counterparties/templates
+  const sel = 'a.z-menuitemwrap-content, span.z-menuitemwrap-content'
+  for (const label of ['Корреспонденты', 'Шаблоны', 'Шаблоны платежей']) {
+    try {
+      const el = p.locator(sel).filter({ hasText: label }).first()
+      await el.click({ timeout: 4000 })
+      await p.waitForTimeout(6000)
+      console.log('[zk] templates nav clicked:', label)
+      break
+    } catch {}
+  }
+
+  const templates = await p.evaluate(() => {
+    const results = []
+    const seen = new Set()
+    document.querySelectorAll('tr.z-listitem, tr.z-row, tr').forEach(row => {
+      const cells = Array.from(row.querySelectorAll('td')).map(td => td.textContent.trim()).filter(Boolean)
+      if (cells.length < 2) return
+      // A counterparty/template row: has a name (non-numeric, > 3 chars) and account number
+      const name = cells.find(c => c.length > 3 && !/^\d+$/.test(c) && !/^\d{2}\.\d{2}/.test(c))
+      const account = cells.find(c => /^\d{20}$/.test(c.replace(/\./g, '').replace(/\s/g, '')))
+      if (!name || !account) return
+      const key = account
+      if (seen.has(key)) return
+      seen.add(key)
+      const bic = cells.find(c => /^\d{9}$/.test(c)) || ''
+      results.push({ id: account, name, account: account.replace(/\./g, ''), bank: '', bic, inn: '' })
+    })
+    return results
+  })
+
+  console.log('[zk] Templates found:', templates.length)
+  return templates
+}
+
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, closeBrowser }
