@@ -3,6 +3,7 @@ const { chromium } = require('playwright-chromium')
 let browser = null
 let page = null
 let sessionExpiry = 0
+let cachedAccounts = []  // shared between accounts and payments calls
 
 const BASE = 'https://dbo.centrinvest.ru/sbns-web'
 const LOGIN_URL = `${BASE}/ru/html/login.html`
@@ -145,6 +146,7 @@ async function getAccountsViaResponseListener(p) {
   }
 
   console.log('[browser] Found accounts:', accounts.length, accounts.map(a => a.number))
+  if (accounts.length > 0) cachedAccounts = accounts
   return accounts
 }
 
@@ -270,12 +272,23 @@ async function getPaymentsViaResponseListener(p) {
 
   // Step 5: try direct REST API calls from page context (uses browser session/cookies)
   const origin = 'https://dbo.centrinvest.ru'
-  const basePath = p.url().includes('/api-ui') ? '/api-ui' : '/sbns-web'
+  const today = new Date().toISOString().split('T')[0]
+  const ago90 = new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0]
+
+  // Generic paths + account-specific transaction paths
+  const accounts4Api = cachedAccounts.length > 0 ? cachedAccounts : [{ number: '' }]
   const tryPaths = [
     '/api/v1/payments', '/api/v1/transactions', '/api/v1/documents',
     '/api/v1/history', '/api/v1/operations', '/api/v1/statements',
     '/api/payments', '/api/documents', '/api/transactions', '/api/operations',
     '/rest/v1/payments', '/rest/v1/transactions',
+    // Account-specific paths with known account numbers
+    ...accounts4Api.flatMap(a => a.number ? [
+      `/api/v1/accounts/${a.number}/transactions`,
+      `/api/v1/accounts/${a.number}/statements`,
+      `/api/v1/accounts/${a.number}/history`,
+      `/api/v1/statements?accountNumber=${a.number}&dateFrom=${ago90}&dateTo=${today}`,
+    ] : []),
   ]
   for (const path of tryPaths) {
     try {
@@ -288,7 +301,7 @@ async function getPaymentsViaResponseListener(p) {
         return { url: origin + path, body: text }
       }, { origin, path })
       if (result && result.body.length > 10) {
-        console.log('[browser] Direct API:', path, result.body.length + 'b', result.body.substring(0, 400))
+        console.log('[browser] Direct API hit:', path, result.body.length + 'b', result.body.substring(0, 400))
         apiData.push(result)
       }
     } catch {}
