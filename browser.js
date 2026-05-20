@@ -1026,4 +1026,12 @@ async function getPaymentsDebug(username, password) {
   return { version: 'v14', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,3000), popupText, amountElements, allInputs, allButtons, rows, dateRowsHtml, domSearch }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
+function getApiResponsesDebug() {
+  return cachedApiResponses.map(r => ({
+    url: r.url.replace('https://dbo.centrinvest.ru', ''),
+    length: r.body.length,
+    preview: r.body.substring(0, 500)
+  }))
+}
+
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, closeBrowser }
