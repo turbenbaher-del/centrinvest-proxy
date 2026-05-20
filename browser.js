@@ -334,10 +334,33 @@ async function getPaymentsData(username, password) {
 async function getPaymentsViaResponseListener(p) {
   console.log('[browser] Collecting payment data, URL:', p.url(), 'cached responses:', cachedApiResponses.length)
 
-  // Fast path: the new interface already renders transactions in the DOM.
-  // Parse them directly from page text before doing any slow API navigation.
-  const pageText = await p.evaluate(() => document.body.innerText)
-  const domPayments = parsePaymentLines(pageText)
+  // Fast path: scroll to load all transactions, then parse from DOM text.
+  const scrollAndParse = async () => {
+    let prevCount = 0
+    for (let attempt = 0; attempt < 8; attempt++) {
+      // Dismiss any modal that might have appeared
+      await p.evaluate(() => {
+        const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (modal) {
+          const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
+          const last = btns[btns.length - 1]
+          if (last) last.click()
+          else modal.remove()
+        }
+      })
+      // Scroll to bottom to trigger infinite load
+      await p.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
+      await p.waitForTimeout(1500)
+      const text = await p.evaluate(() => document.body.innerText)
+      const payments = parsePaymentLines(text)
+      console.log('[browser] Scroll attempt', attempt + 1, ':', payments.length, 'payments')
+      if (payments.length === prevCount && attempt > 0) break  // no new items loaded
+      prevCount = payments.length
+    }
+    const finalText = await p.evaluate(() => document.body.innerText)
+    return parsePaymentLines(finalText)
+  }
+  const domPayments = await scrollAndParse()
   if (domPayments.length > 0) {
     console.log('[browser] Got', domPayments.length, 'payments from DOM text (new interface)')
     return domPayments
