@@ -1075,6 +1075,122 @@ async function getAccountsDomDebug(username, password) {
 }
 
 
+
+async function getContractorsFromHistory(username, password) {
+  const p = await ensureLoggedIn(username, password)
+
+  // Dismiss modal if present
+  await p.evaluate(() => {
+    const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+    if (modal) {
+      const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
+      const last = btns[btns.length - 1]
+      if (last) last.click(); else modal.remove()
+    }
+  })
+  await p.waitForTimeout(500)
+
+  // Get list of visible transactions
+  const domText = await p.evaluate(() => document.body.innerText)
+  const payments = parsePaymentLines(domText)
+
+  // Filter unique external recipients (skip self-transfers and bank commission)
+  const selfNames = /ПОПЕНКОВ|ПАО КБ|ЦЕНТР-ИНВЕСТ|корп\.карта|р\/с Ставрополь/i
+  const uniqueByName = {}
+  for (const p of payments) {
+    if (!p.recipient || selfNames.test(p.recipient)) continue
+    if (!uniqueByName[p.recipient]) uniqueByName[p.recipient] = p
+  }
+  const targets = Object.values(uniqueByName)
+  console.log('[browser] Unique external recipients to detail-scrape:', targets.length, targets.map(t => t.recipient))
+
+  const contractors = []
+
+  for (const target of targets) {
+    try {
+      // Click the transaction row that matches this recipient
+      const clicked = await p.evaluate((name) => {
+        const allText = Array.from(document.querySelectorAll('*'))
+        for (const el of allText) {
+          if ((el.childNodes.length <= 3) && (el.textContent || '').trim() === name) {
+            // Walk up to find clickable row
+            let node = el
+            for (let i = 0; i < 5; i++) {
+              if (node.onclick || node.getAttribute('data-at') || node.getAttribute('role') === 'button' ||
+                  /row|item|card/i.test(node.className || '')) {
+                node.click(); return name
+              }
+              node = node.parentElement
+              if (!node) break
+            }
+            el.click(); return name
+          }
+        }
+        return null
+      }, target.recipient)
+
+      if (!clicked) { console.log('[browser] Could not click row for:', target.recipient); continue }
+      await p.waitForTimeout(2000)
+
+      // Extract details from the detail view
+      const detail = await p.evaluate(() => {
+        const text = document.body.innerText
+        // Look for account number (20 digits)
+        const accM = text.match(/(?:счёт|счет|р\/с|р\/сч)[:\s]*(\d{20})/i) ||
+                     text.match(/^(\d{20})$/m)
+        // Look for BIC (9 digits starting with 04)
+        const bicM = text.match(/(?:БИК|BIK)[:\s]*(\d{9})/i) ||
+                     text.match(/\b(04\d{7})\b/)
+        // Look for bank name
+        const bankM = text.match(/(?:банк получателя|банк)[:\s]*([^\n]{5,60})/i)
+        // Look for INN
+        const innM = text.match(/(?:ИНН)[:\s]*(\d{10,12})/i)
+        return {
+          rawText: text.substring(0, 1000),
+          account: accM ? accM[1] : '',
+          bic: bicM ? bicM[1] : '',
+          bank: bankM ? bankM[1].trim() : '',
+          inn: innM ? innM[1] : '',
+        }
+      })
+
+      console.log('[browser] Detail for', target.recipient, ':', JSON.stringify(detail).substring(0, 200))
+
+      if (detail.account || detail.bic) {
+        contractors.push({
+          id: target.recipient.replace(/\s+/g, '_').substring(0, 40),
+          name: target.recipient,
+          account: detail.account,
+          bic: detail.bic,
+          bank: detail.bank,
+          inn: detail.inn,
+        })
+      } else {
+        // Add without account info — user can fill in manually
+        contractors.push({
+          id: target.recipient.replace(/\s+/g, '_').substring(0, 40),
+          name: target.recipient,
+          account: '',
+          bic: '',
+          bank: '',
+          inn: '',
+        })
+      }
+
+      // Navigate back to payments list
+      await p.goBack().catch(() => {})
+      await p.waitForTimeout(1500)
+
+    } catch (e) {
+      console.log('[browser] Error processing', target.recipient, ':', e.message)
+    }
+  }
+
+  console.log('[browser] Extracted', contractors.length, 'contractors')
+  return contractors
+}
+
+
 async function submitPayment(username, password, paymentData) {
   const p = await ensureLoggedIn(username, password)
 
@@ -1209,4 +1325,4 @@ async function submitPayment(username, password, paymentData) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, closeBrowser }

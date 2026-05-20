@@ -1,6 +1,6 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, closeBrowser } = require('./browser')
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -68,6 +68,16 @@ app.post('/api/payments', async (req, res) => {
         modifiedAt: new Date().toISOString(),
       }
     })
+  }
+})
+
+app.get('/api/contractors', async (req, res) => {
+  try {
+    const data = await getContractorsFromHistory(USERNAME, PASSWORD)
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[contractors]', err.message)
+    res.status(500).json({ success: false, error: err.message })
   }
 })
 
