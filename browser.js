@@ -151,9 +151,25 @@ async function getAccountsViaResponseListener(p) {
     } catch {}
   }
 
+  // Fallback: parse account numbers from page text (new interface shows them in DOM)
   if (accounts.length === 0) {
     const bodyText = await p.evaluate(() => document.body.innerText)
-    console.log('[browser] No accounts found. Page text:', bodyText.substring(0, 400))
+    console.log('[browser] No accounts via API, parsing page text...')
+    const numMatches = bodyText.match(/\b\d{20}\b/g) || []
+    const seen2 = new Set()
+    for (const num of numMatches) {
+      if (seen2.has(num)) continue
+      seen2.add(num)
+      const idx = bodyText.indexOf(num)
+      const nearby = bodyText.substring(idx, idx + 300)
+      // Look for "1 234,56 ₽" or "1234.56 ₽" near the account number
+      const balM = nearby.match(/(\d[\d\s]*[,.]\d{2})\s*₽/)
+      const balance = balM ? parseFloat(balM[1].replace(/\s/g, '').replace(',', '.')) : 0
+      const currM = nearby.match(/\b(RUR|RUB|USD|EUR|CNY|GBP)\b/)
+      const currency = currM ? (currM[1] === 'RUB' ? 'RUR' : currM[1]) : 'RUR'
+      accounts.push({ number: num, currency, balance, status: 'Открыт' })
+    }
+    console.log('[browser] Parsed from page text:', accounts.length)
   }
 
   console.log('[browser] Found accounts:', accounts.length, accounts.map(a => a.number))
@@ -257,7 +273,7 @@ function parsePaymentLines(text) {
       const key = `${date}|${docNum}|${amount}`
       if (!seen.has(key)) {
         seen.add(key)
-        payments.push({ date, number: docNum, recipient: counterparty, amount, status: 'ГО' })
+        payments.push({ date, number: docNum, recipient: counterparty, amount, status: 'executed' })
       }
     }
   }

@@ -49,6 +49,20 @@ app.get('/api/payments', async (req, res) => {
   }
 })
 
+app.post('/api/payments', (req, res) => {
+  // Payments are read-only from DBO scraping; drafts are created locally on client.
+  // Return the submitted data as a confirmed draft so the PWA form works.
+  const body = req.body || {}
+  const draft = {
+    ...body,
+    id: `draft-${Date.now()}`,
+    status: 'draft',
+    createdAt: new Date().toISOString(),
+    modifiedAt: new Date().toISOString(),
+  }
+  res.json({ success: true, data: draft })
+})
+
 app.get('/api/templates', async (req, res) => {
   try {
     const data = await getTemplatesData(USERNAME, PASSWORD)
