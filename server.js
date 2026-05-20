@@ -1,6 +1,6 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, closeBrowser } = require('./browser')
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -49,18 +49,26 @@ app.get('/api/payments', async (req, res) => {
   }
 })
 
-app.post('/api/payments', (req, res) => {
-  // Payments are read-only from DBO scraping; drafts are created locally on client.
-  // Return the submitted data as a confirmed draft so the PWA form works.
+app.post('/api/payments', async (req, res) => {
   const body = req.body || {}
-  const draft = {
-    ...body,
-    id: `draft-${Date.now()}`,
-    status: 'draft',
-    createdAt: new Date().toISOString(),
-    modifiedAt: new Date().toISOString(),
+  try {
+    const result = await submitPayment(USERNAME, PASSWORD, body)
+    res.json({ success: true, data: result })
+  } catch (err) {
+    console.error('[payments POST]', err.message)
+    // Fall back to draft so UI doesn't break
+    res.json({
+      success: false,
+      error: err.message,
+      data: {
+        ...body,
+        id: `draft-${Date.now()}`,
+        status: 'draft',
+        createdAt: new Date().toISOString(),
+        modifiedAt: new Date().toISOString(),
+      }
+    })
   }
-  res.json({ success: true, data: draft })
 })
 
 app.get('/api/templates', async (req, res) => {

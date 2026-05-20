@@ -1074,4 +1074,139 @@ async function getAccountsDomDebug(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, closeBrowser }
+
+async function submitPayment(username, password, paymentData) {
+  const p = await ensureLoggedIn(username, password)
+
+  console.log('[browser] Submitting payment:', JSON.stringify(paymentData).substring(0, 200))
+
+  // Dismiss modal if present
+  await p.evaluate(() => {
+    const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+    if (modal) {
+      const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
+      const last = btns[btns.length - 1]
+      if (last) last.click(); else modal.remove()
+    }
+  })
+  await p.waitForTimeout(500)
+
+  // Click "Оплатить" (Pay) in the nav to open payment form
+  try {
+    await p.click('text=Оплатить', { timeout: 5000 })
+    await p.waitForTimeout(2000)
+  } catch {
+    // Try "Создать" button
+    try {
+      await p.click('text=Создать', { timeout: 3000 })
+      await p.waitForTimeout(2000)
+    } catch (e) {
+      throw new Error('Не удалось открыть форму платежа: ' + e.message)
+    }
+  }
+
+  // If multiple options appear, click "Платёж" or "Платежное поручение"
+  try {
+    const optionClicked = await p.evaluate(() => {
+      const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button, a'))
+      for (const el of items) {
+        const t = (el.textContent || '').trim()
+        if (/^(Платёж|Платежное поручение|Платеж)$/i.test(t)) {
+          el.click(); return t
+        }
+      }
+      return null
+    })
+    if (optionClicked) {
+      console.log('[browser] Clicked option:', optionClicked)
+      await p.waitForTimeout(2000)
+    }
+  } catch {}
+
+  // Fill recipient account
+  const rec = paymentData.recipient || {}
+  const fillField = async (labelText, value) => {
+    if (!value) return
+    try {
+      // Try label-based targeting
+      const filled = await p.evaluate((args) => {
+        const [label, val] = args
+        const labels = Array.from(document.querySelectorAll('label, [placeholder]'))
+        for (const el of labels) {
+          if ((el.textContent || el.getAttribute('placeholder') || '').toLowerCase().includes(label.toLowerCase())) {
+            const input = el.tagName === 'LABEL'
+              ? document.getElementById(el.htmlFor) || el.nextElementSibling
+              : el
+            if (input && (input.tagName === 'INPUT' || input.tagName === 'TEXTAREA')) {
+              input.focus()
+              input.value = val
+              input.dispatchEvent(new Event('input', { bubbles: true }))
+              input.dispatchEvent(new Event('change', { bubbles: true }))
+              return true
+            }
+          }
+        }
+        return false
+      }, [labelText, value])
+      if (filled) console.log('[browser] Filled field:', labelText)
+    } catch (e) {
+      console.log('[browser] Could not fill', labelText, ':', e.message)
+    }
+  }
+
+  await fillField('счёт получателя', rec.account || '')
+  await fillField('расчётный счёт', rec.account || '')
+  await p.waitForTimeout(500)
+  await fillField('бик', rec.bic || '')
+  await fillField('БИК', rec.bic || '')
+  await p.waitForTimeout(800)
+  await fillField('получател', rec.name || '')
+  await fillField('наименование', rec.name || '')
+  await fillField('сумм', String(paymentData.amount || ''))
+  await fillField('назначение', paymentData.purpose || '')
+
+  // Capture the form state for debugging
+  const formState = await p.evaluate(() => {
+    const inputs = Array.from(document.querySelectorAll('input, textarea, select'))
+    return inputs.map(el => ({
+      name: el.getAttribute('name') || el.getAttribute('placeholder') || el.id || '',
+      value: el.value,
+      type: el.tagName
+    })).filter(f => f.name || f.value)
+  })
+  console.log('[browser] Form state after fill:', JSON.stringify(formState).substring(0, 600))
+
+  // Submit the form
+  try {
+    // Try clicking submit button
+    const submitted = await p.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button[type="submit"], button'))
+      const submitBtn = btns.find(b => /отправ|подпис|сохран|создат|ok|далее|продолж/i.test(b.textContent || ''))
+      if (submitBtn) { submitBtn.click(); return (submitBtn.textContent || '').trim() }
+      return null
+    })
+    if (submitted) {
+      console.log('[browser] Clicked submit:', submitted)
+      await p.waitForTimeout(3000)
+    } else {
+      throw new Error('Кнопка отправки не найдена')
+    }
+  } catch (e) {
+    throw new Error('Ошибка отправки формы: ' + e.message)
+  }
+
+  // Check result
+  const resultText = await p.evaluate(() => document.body.innerText)
+  const success = /исполнен|отправлен|принят|сохранён|черновик|создан/i.test(resultText.substring(0, 500))
+  const docNum = (resultText.match(/№\s*([\d\/]+)/) || [])[1] || `local-${Date.now()}`
+
+  return {
+    ...paymentData,
+    id: docNum,
+    status: success ? 'created' : 'draft',
+    createdAt: new Date().toISOString(),
+    modifiedAt: new Date().toISOString(),
+  }
+}
+
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, closeBrowser }
