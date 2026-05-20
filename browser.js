@@ -264,7 +264,7 @@ function parsePaymentLines(text) {
       }
     }
 
-    if (counterparty || amount !== 0) {
+    if (amount !== 0 && counterparty && !counterparty.startsWith('От:')) {
       const key = `${date}|${docNum}|${amount}`
       if (!seen.has(key)) {
         seen.add(key)
