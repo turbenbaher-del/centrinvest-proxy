@@ -204,6 +204,66 @@ async function getAccountsClassicZK(p) {
   })
 }
 
+// Parse transactions from the new API-UI interface page text.
+// The new interface renders transactions as plain text in this pattern:
+//   dd.mm.yyyy
+//   № docnum,
+//   [optional: счет списания / status lines]
+//   ГО (status)
+//   COUNTERPARTY NAME
+//   description text
+//   +/-amount.xx ₽
+function parsePaymentLines(text) {
+  const payments = []
+  const seen = new Set()
+  // Start parsing from after "РАСШИРЕННЫЙ ПОИСК" marker to skip nav/header dates
+  const markerIdx = text.indexOf('РАСШИРЕННЫЙ ПОИСК')
+  const txText = markerIdx >= 0 ? text.substring(markerIdx + 17) : text
+  const lines = txText.split('\n').map(l => l.trim()).filter(Boolean)
+  const dateRe = /^\d{2}\.\d{2}\.\d{4}$/
+  const amtRe = /^([+\-]?\d[\d\s]*[,.]\d{2})\s*₽?$/
+
+  let i = 0
+  while (i < lines.length) {
+    if (!dateRe.test(lines[i])) { i++; continue }
+    const date = lines[i]; i++
+
+    let docNum = '', counterparty = '', desc = '', amount = 0
+    const chunk = []
+    while (i < lines.length && !dateRe.test(lines[i]) && !amtRe.test(lines[i])) {
+      chunk.push(lines[i]); i++
+    }
+    if (i < lines.length && amtRe.test(lines[i])) {
+      const m = lines[i].match(amtRe)
+      amount = parseFloat((m[1] || '0').replace(/\s/g, '').replace(',', '.')) || 0
+      i++
+    }
+
+    for (const line of chunk) {
+      if (/^№\s*[\d\/\-]+,?$/.test(line)) {
+        docNum = line.replace(/^№\s*/, '').replace(/,$/, '').trim()
+      } else if (/^(ГО|ИСПОЛНЕН|ОТКЛОНЕН|ЧЕРНОВИК|НА ПОДПИСЬ|В ОБРАБОТКЕ)$/.test(line)) {
+        // status — skip
+      } else if (/^счет /i.test(line) || line === ' ') {
+        // skip
+      } else if (!counterparty) {
+        counterparty = line
+      } else {
+        desc += (desc ? ' ' : '') + line
+      }
+    }
+
+    if (counterparty || amount !== 0) {
+      const key = `${date}|${docNum}|${amount}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        payments.push({ date, number: docNum, recipient: counterparty, amount, status: 'ГО' })
+      }
+    }
+  }
+  return payments
+}
+
 function extractPaymentsFromApiData(apiData) {
   const payments = []
   const seen = new Set()
@@ -262,6 +322,15 @@ async function getPaymentsData(username, password) {
 
 async function getPaymentsViaResponseListener(p) {
   console.log('[browser] Collecting payment data, URL:', p.url(), 'cached responses:', cachedApiResponses.length)
+
+  // Fast path: the new interface already renders transactions in the DOM.
+  // Parse them directly from page text before doing any slow API navigation.
+  const pageText = await p.evaluate(() => document.body.innerText)
+  const domPayments = parsePaymentLines(pageText)
+  if (domPayments.length > 0) {
+    console.log('[browser] Got', domPayments.length, 'payments from DOM text (new interface)')
+    return domPayments
+  }
 
   // Payments can reuse the captured responses from the accounts navigation.
   // Attempt extraction from cached data first.
