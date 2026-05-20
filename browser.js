@@ -95,25 +95,36 @@ async function getAccountsViaResponseListener(p) {
 
   p.on('response', onResponse)
 
-  // Navigate to accounts/statement section (known to work)
-  try { await p.click('text=Счета и платежи', { timeout: 5000 }); await p.waitForTimeout(3000) } catch {}
-  try { await p.click('text=Выписка', { timeout: 3000 }); await p.waitForTimeout(3000) } catch {}
+  // Dismiss any "mustRead" modal that blocks navigation
+  const dismissed = await p.evaluate(() => {
+    const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+    if (!modal) return false
+    const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
+    const closeBtn = btns.find(b => /закр|ок\b|ok\b|прочит|понят|close|подтв/i.test(b.textContent || '')) || btns[btns.length - 1]
+    if (closeBtn) { closeBtn.click(); return 'btn:' + (closeBtn.textContent || '').trim().substring(0, 30) }
+    modal.remove()
+    return 'removed'
+  })
+  if (dismissed) { console.log('[browser] Dismissed modal:', dismissed); await p.waitForTimeout(1000) }
+  else { await p.keyboard.press('Escape'); await p.waitForTimeout(500) }
 
-  // Also click on first account row to trigger its transaction API calls
-  const clickedAccount = await p.evaluate(() => {
-    const rows = document.querySelectorAll('tr, [class*="row"], [class*="item"], li')
-    for (const row of rows) {
-      if (/\d{5}[.\d]{15,}/.test(row.textContent || '')) {
-        row.click()
-        return (row.textContent || '').trim().substring(0, 60)
+  // Navigate to statement section
+  try { await p.click('text=Счета и платежи', { timeout: 5000 }); await p.waitForTimeout(3000) } catch {}
+  try { await p.click('text=Выписка', { timeout: 3000 }); await p.waitForTimeout(2000) } catch {}
+
+  // Try clicking the account number to open account switcher and reveal all accounts
+  const switcherOpened = await p.evaluate(() => {
+    const allEls = Array.from(document.querySelectorAll('*'))
+    for (const el of allEls) {
+      const t = (el.childNodes.length === 1 && el.childNodes[0].nodeType === 3)
+        ? (el.textContent || '').trim() : ''
+      if (/^\d{20}$/.test(t) || /^\d{5}\.\d{3}\.\d\.\d{11}$/.test(t)) {
+        el.click(); return t
       }
     }
     return null
   })
-  if (clickedAccount) {
-    console.log('[browser] Clicked account:', clickedAccount)
-    await p.waitForTimeout(3000)
-  }
+  if (switcherOpened) { console.log('[browser] Clicked account number:', switcherOpened); await p.waitForTimeout(2000) }
 
   p.off('response', onResponse)
   console.log('[browser] Captured', apiData.length, 'API responses total')
@@ -121,63 +132,40 @@ async function getAccountsViaResponseListener(p) {
   // Save for payments endpoint to reuse
   cachedApiResponses = apiData
 
-  // Parse account numbers
+  // Parse from DOM text — balance is in page header, account num in transaction rows
+  const pageBodyText = await p.evaluate(() => document.body.innerText)
+
+  // Balance: look for "СОБСТВЕННЫЕ СРЕДСТВА ... {amount} ₽" in page header
+  const ownFundsM = pageBodyText.match(/СОБСТВЕННЫЕ СРЕДСТВА[\s\S]{0,30}?([\d\s]+[.,]\d{2})\s*₽/)
+  const currentBalance = ownFundsM
+    ? parseFloat(ownFundsM[1].replace(/[\s ]/g, '').replace(',', '.')) : 0
+  console.log('[browser] Balance from header:', currentBalance)
+
+  // Account numbers: only valid Russian bank account prefixes
+  const accountPrefix = /^(407|408|423|301|455|454|426|427|428|429|430|431)/
+  const allNums = [...new Set((pageBodyText.match(/\b\d{20}\b/g) || []).filter(n => accountPrefix.test(n)))]
+  console.log('[browser] Account numbers in DOM:', allNums)
+
   const accounts = []
   const seen = new Set()
-  for (const { url, body } of apiData) {
+  allNums.forEach((num, idx) => {
+    if (seen.has(num)) return
+    seen.add(num)
+    accounts.push({ number: num, currency: 'RUR', balance: idx === 0 ? currentBalance : 0, status: 'Открыт' })
+  })
+
+  // Supplement with any account numbers from API responses
+  for (const { body } of apiData) {
     try {
-      const nums = body.match(/\d{20}/g) || []
-      const dotNums = body.match(/\d{5}\.\d{3}\.\d\.\d{11}/g) || []
-      dotNums.forEach(n => nums.push(n.replace(/\./g, '')))
+      const nums = (body.match(/\b\d{20}\b/g) || []).filter(n => accountPrefix.test(n))
       nums.forEach(n => {
-        if (!seen.has(n)) {
-          seen.add(n)
-          let balance = 0, currency = 'RUR', status = 'Открыт'
-          try {
-            const parsed = JSON.parse(body)
-            const find = (obj, key) => {
-              if (!obj || typeof obj !== 'object') return undefined
-              if (obj[key] !== undefined) return obj[key]
-              for (const v of Object.values(obj)) {
-                const r = find(v, key); if (r !== undefined) return r
-              }
-            }
-            balance = parseFloat(find(parsed, 'balance') || find(parsed, 'остаток') || 0) || 0
-            currency = find(parsed, 'currency') || find(parsed, 'валюта') || 'RUR'
-          } catch {}
-          accounts.push({ number: n, currency, balance, status })
-        }
+        if (seen.has(n)) return
+        seen.add(n)
+        accounts.push({ number: n, currency: 'RUR', balance: 0, status: 'Открыт' })
       })
     } catch {}
   }
-
-  // Fallback: navigate to "Счета и платежи" and parse account list from page text
-  if (accounts.length === 0) {
-    console.log('[browser] No accounts via API, navigating to accounts section...')
-    // Try to click accounts section in new UI
-    try {
-      await p.click('text=Счета и платежи', { timeout: 4000 })
-      await p.waitForTimeout(4000)
-    } catch {}
-    const bodyText = await p.evaluate(() => document.body.innerText)
-    const numMatches = bodyText.match(/\b\d{20}\b/g) || []
-    const seen2 = new Set()
-    for (const num of numMatches) {
-      if (seen2.has(num)) continue
-      // Only Russian bank account prefixes (407, 408, 423, 301, 455 etc.)
-      if (!/^(407|408|423|301|455|454|426|427|428|429|430|431)/.test(num)) continue
-      seen2.add(num)
-      const idx = bodyText.indexOf(num)
-      const nearby = bodyText.substring(idx, idx + 400)
-      // Balance must have decimal: "483,81 ₽" — not just "1" or "100"
-      const balM = nearby.match(/(\d{1,3}(?:[\s ]\d{3})*[,.]\d{2})\s*₽/)
-      const balance = balM ? parseFloat(balM[1].replace(/[\s ]/g, '').replace(',', '.')) : 0
-      const currM = nearby.match(/\b(RUR|RUB|USD|EUR|CNY|GBP)\b/)
-      const currency = currM ? (currM[1] === 'RUB' ? 'RUR' : currM[1]) : 'RUR'
-      accounts.push({ number: num, currency, balance, status: 'Открыт' })
-    }
-    console.log('[browser] Parsed from page text:', accounts.length, accounts.map(a => `${a.number}=${a.balance}`))
-  }
+  console.log('[browser] Parsed accounts:', accounts.map(a => `${a.number}=${a.balance}`))
 
   console.log('[browser] Found accounts:', accounts.length, accounts.map(a => a.number))
   if (accounts.length > 0) cachedAccounts = accounts
