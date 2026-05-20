@@ -1034,4 +1034,33 @@ function getApiResponsesDebug() {
   }))
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, closeBrowser }
+async function getAccountsDomDebug(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  const before = { url: p.url() }
+  const apiCapture = []
+  const onResp = async (resp) => {
+    if (!resp.url().includes('centrinvest.ru')) return
+    if (resp.status() !== 200) return
+    try {
+      const ct = resp.headers()['content-type'] || ''
+      if (!ct.includes('json')) return
+      const body = await resp.text()
+      if (body.length > 10) apiCapture.push({ url: resp.url().replace('https://dbo.centrinvest.ru', ''), body: body.substring(0, 800) })
+    } catch {}
+  }
+  p.on('response', onResp)
+  try { await p.click('text=Счета и платежи', { timeout: 5000 }); await p.waitForTimeout(3000) } catch (e) { before.clickErr = e.message }
+  p.off('response', onResp)
+  const domText = await p.evaluate(() => document.body.innerText)
+  return {
+    urlBefore: before.url,
+    urlAfter: p.url(),
+    clickErr: before.clickErr,
+    apiCapture,
+    domTextLength: domText.length,
+    domTextPreview: domText.substring(0, 2000),
+    accountNumbers: (domText.match(/\b\d{20}\b/g) || []).slice(0, 30)
+  }
+}
+
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, closeBrowser }

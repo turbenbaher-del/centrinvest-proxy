@@ -1,6 +1,6 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, closeBrowser } = require('./browser')
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -95,6 +95,15 @@ app.get('/api/nav-debug', async (req, res) => {
 
 app.get('/debug/api-responses', (req, res) => {
   res.json({ success: true, data: getApiResponsesDebug() })
+})
+
+app.get('/debug/accounts-dom', async (req, res) => {
+  try {
+    const data = await getAccountsDomDebug(USERNAME, PASSWORD)
+    res.json({ success: true, data })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
 })
 
 app.post('/api/logout', async (_, res) => {
