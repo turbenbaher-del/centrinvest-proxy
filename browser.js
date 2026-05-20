@@ -151,25 +151,32 @@ async function getAccountsViaResponseListener(p) {
     } catch {}
   }
 
-  // Fallback: parse account numbers from page text (new interface shows them in DOM)
+  // Fallback: navigate to "Счета и платежи" and parse account list from page text
   if (accounts.length === 0) {
+    console.log('[browser] No accounts via API, navigating to accounts section...')
+    // Try to click accounts section in new UI
+    try {
+      await p.click('text=Счета и платежи', { timeout: 4000 })
+      await p.waitForTimeout(4000)
+    } catch {}
     const bodyText = await p.evaluate(() => document.body.innerText)
-    console.log('[browser] No accounts via API, parsing page text...')
     const numMatches = bodyText.match(/\b\d{20}\b/g) || []
     const seen2 = new Set()
     for (const num of numMatches) {
       if (seen2.has(num)) continue
+      // Only Russian bank account prefixes (407, 408, 423, 301, 455 etc.)
+      if (!/^(407|408|423|301|455|454|426|427|428|429|430|431)/.test(num)) continue
       seen2.add(num)
       const idx = bodyText.indexOf(num)
-      const nearby = bodyText.substring(idx, idx + 300)
-      // Look for "1 234,56 ₽" or "1234.56 ₽" near the account number
-      const balM = nearby.match(/(\d[\d\s]*[,.]\d{2})\s*₽/)
-      const balance = balM ? parseFloat(balM[1].replace(/\s/g, '').replace(',', '.')) : 0
+      const nearby = bodyText.substring(idx, idx + 400)
+      // Balance must have decimal: "483,81 ₽" — not just "1" or "100"
+      const balM = nearby.match(/(\d{1,3}(?:[\s ]\d{3})*[,.]\d{2})\s*₽/)
+      const balance = balM ? parseFloat(balM[1].replace(/[\s ]/g, '').replace(',', '.')) : 0
       const currM = nearby.match(/\b(RUR|RUB|USD|EUR|CNY|GBP)\b/)
       const currency = currM ? (currM[1] === 'RUB' ? 'RUR' : currM[1]) : 'RUR'
       accounts.push({ number: num, currency, balance, status: 'Открыт' })
     }
-    console.log('[browser] Parsed from page text:', accounts.length)
+    console.log('[browser] Parsed from page text:', accounts.length, accounts.map(a => `${a.number}=${a.balance}`))
   }
 
   console.log('[browser] Found accounts:', accounts.length, accounts.map(a => a.number))
