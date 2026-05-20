@@ -847,6 +847,30 @@ async function getPaymentsDebug(username, password) {
     return null
   })
 
+  // Find DOM structure for amount elements (works for new API-UI interface)
+  const amountElements = await p.evaluate(() => {
+    const out = []
+    const amtRe = /[+\-]?\d[\d\s]*[,.]\d{2}\s*[₽$€]|[+\-]\d+\.?\d*\s*₽/
+    for (const el of document.querySelectorAll('*')) {
+      if (el.children.length > 0) continue
+      const t = (el.textContent || '').trim()
+      if (!amtRe.test(t)) continue
+      const parent = el.parentElement
+      const grand = parent?.parentElement
+      out.push({
+        tag: el.tagName,
+        cls: (el.className || '').substring(0, 60),
+        text: t.substring(0, 40),
+        parentTag: parent?.tagName,
+        parentCls: (parent?.className || '').substring(0, 80),
+        grandCls: (grand?.className || '').substring(0, 80),
+        rowHtml: (grand?.outerHTML || parent?.outerHTML || '').substring(0, 500),
+      })
+      if (out.length >= 5) break
+    }
+    return out
+  })
+
   const pageTextAfter = await p.evaluate(() => document.body.innerText.substring(0, 2000))
   const allInputs = await p.evaluate(() =>
     Array.from(document.querySelectorAll('input')).map(i => ({ type: i.type, value: i.value, placeholder: i.placeholder, cls: i.className.substring(0,40) })).slice(0, 20)
@@ -907,7 +931,7 @@ async function getPaymentsDebug(username, password) {
     return results
   })
 
-  return { version: 'v13', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,3000), popupText, allInputs, allButtons, rows, dateRowsHtml, domSearch }
+  return { version: 'v14', clickedLabel, filterResult, pageTextBefore: pageTextBefore.substring(0,600), pageTextAfter: pageTextAfter.substring(0,3000), popupText, amountElements, allInputs, allButtons, rows, dateRowsHtml, domSearch }
 }
 
 module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, closeBrowser }
