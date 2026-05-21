@@ -71,6 +71,28 @@ app.post('/api/payments', async (req, res) => {
   }
 })
 
+app.get('/debug/contractors-raw', async (req, res) => {
+  try {
+    const p = await require('./browser').getAccountsDomDebug ? null : null  // ensure browser loaded
+    const { chromium } = require('playwright-chromium')
+    // Re-use session via the module-level page
+    const mod = require('./browser')
+    // Just get DOM text of current page
+    const data = await mod.getAccountsDomDebug(USERNAME, PASSWORD)
+    const text = data.domTextPreview || ''
+    const payments = text.split('\n').filter(l => /^\d{2}\.\d{2}\.\d{4}$/.test(l.trim()))
+    res.json({
+      url: data.urlAfter,
+      domLen: data.domTextLength,
+      dateLines: payments.length,
+      accountNumbers: data.accountNumbers,
+      preview: text.substring(0, 3000),
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.get('/api/contractors', async (req, res) => {
   try {
     const data = await getContractorsFromHistory(USERNAME, PASSWORD)
