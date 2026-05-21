@@ -1079,7 +1079,7 @@ async function getAccountsDomDebug(username, password) {
 async function getContractorsFromHistory(username, password) {
   const p = await ensureLoggedIn(username, password)
 
-  // Dismiss modal if present
+  // Dismiss modal
   await p.evaluate(() => {
     const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
     if (modal) {
@@ -1090,105 +1090,128 @@ async function getContractorsFromHistory(username, password) {
   })
   await p.waitForTimeout(500)
 
-  // Get list of visible transactions
-  const domText = await p.evaluate(() => document.body.innerText)
-  const payments = parsePaymentLines(domText)
+  // Scroll to load all visible transactions (same as payments fast path)
+  let prevCount = 0
+  for (let attempt = 0; attempt < 8; attempt++) {
+    await p.evaluate(() => {
+      const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+      if (modal) {
+        const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
+        const last = btns[btns.length - 1]
+        if (last) last.click(); else modal.remove()
+      }
+      window.scrollTo(0, document.body.scrollHeight)
+    })
+    await p.waitForTimeout(1500)
+    const text = await p.evaluate(() => document.body.innerText)
+    const payments = parsePaymentLines(text)
+    console.log('[contractors] Scroll attempt', attempt + 1, ':', payments.length, 'payments found')
+    if (payments.length === prevCount && attempt > 0) break
+    prevCount = payments.length
+  }
 
-  // Filter unique external recipients (skip self-transfers and bank commission)
+  const finalText = await p.evaluate(() => document.body.innerText)
+  const payments = parsePaymentLines(finalText)
+  console.log('[contractors] Total payments to scan:', payments.length)
+
+  // Filter unique external recipients
   const selfNames = /ПОПЕНКОВ|ПАО КБ|ЦЕНТР-ИНВЕСТ|корп\.карта|р\/с Ставрополь/i
   const uniqueByName = {}
-  for (const p of payments) {
-    if (!p.recipient || selfNames.test(p.recipient)) continue
-    if (!uniqueByName[p.recipient]) uniqueByName[p.recipient] = p
+  for (const pay of payments) {
+    const name = (pay.recipient || '').trim()
+    if (!name || selfNames.test(name)) continue
+    if (!uniqueByName[name]) uniqueByName[name] = pay
   }
   const targets = Object.values(uniqueByName)
-  console.log('[browser] Unique external recipients to detail-scrape:', targets.length, targets.map(t => t.recipient))
+  console.log('[contractors] Unique external recipients:', targets.length, targets.map(t => t.recipient))
+
+  if (targets.length === 0) return []
 
   const contractors = []
 
   for (const target of targets) {
-    try {
-      // Click the transaction row that matches this recipient
-      const clicked = await p.evaluate((name) => {
-        const allText = Array.from(document.querySelectorAll('*'))
-        for (const el of allText) {
-          if ((el.childNodes.length <= 3) && (el.textContent || '').trim() === name) {
-            // Walk up to find clickable row
-            let node = el
-            for (let i = 0; i < 5; i++) {
-              if (node.onclick || node.getAttribute('data-at') || node.getAttribute('role') === 'button' ||
-                  /row|item|card/i.test(node.className || '')) {
-                node.click(); return name
-              }
-              node = node.parentElement
-              if (!node) break
+    // Try to click on this row to open transaction detail
+    const rowClicked = await p.evaluate((name) => {
+      // Find element containing exactly this name
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+      let node
+      while ((node = walker.nextNode())) {
+        if (node.textContent.trim() === name) {
+          // Walk up to find a clickable container
+          let el = node.parentElement
+          for (let i = 0; i < 6 && el; i++) {
+            if (el.onclick || window.getComputedStyle(el).cursor === 'pointer') {
+              el.click(); return name
             }
-            el.click(); return name
+            el = el.parentElement
           }
+          // Click the text node's parent anyway
+          node.parentElement && node.parentElement.click()
+          return name
         }
-        return null
-      }, target.recipient)
-
-      if (!clicked) { console.log('[browser] Could not click row for:', target.recipient); continue }
-      await p.waitForTimeout(2000)
-
-      // Extract details from the detail view
-      const detail = await p.evaluate(() => {
-        const text = document.body.innerText
-        // Look for account number (20 digits)
-        const accM = text.match(/(?:счёт|счет|р\/с|р\/сч)[:\s]*(\d{20})/i) ||
-                     text.match(/^(\d{20})$/m)
-        // Look for BIC (9 digits starting with 04)
-        const bicM = text.match(/(?:БИК|BIK)[:\s]*(\d{9})/i) ||
-                     text.match(/\b(04\d{7})\b/)
-        // Look for bank name
-        const bankM = text.match(/(?:банк получателя|банк)[:\s]*([^\n]{5,60})/i)
-        // Look for INN
-        const innM = text.match(/(?:ИНН)[:\s]*(\d{10,12})/i)
-        return {
-          rawText: text.substring(0, 1000),
-          account: accM ? accM[1] : '',
-          bic: bicM ? bicM[1] : '',
-          bank: bankM ? bankM[1].trim() : '',
-          inn: innM ? innM[1] : '',
-        }
-      })
-
-      console.log('[browser] Detail for', target.recipient, ':', JSON.stringify(detail).substring(0, 200))
-
-      if (detail.account || detail.bic) {
-        contractors.push({
-          id: target.recipient.replace(/\s+/g, '_').substring(0, 40),
-          name: target.recipient,
-          account: detail.account,
-          bic: detail.bic,
-          bank: detail.bank,
-          inn: detail.inn,
-        })
-      } else {
-        // Add without account info — user can fill in manually
-        contractors.push({
-          id: target.recipient.replace(/\s+/g, '_').substring(0, 40),
-          name: target.recipient,
-          account: '',
-          bic: '',
-          bank: '',
-          inn: '',
-        })
       }
+      return null
+    }, target.recipient)
 
-      // Navigate back to payments list
-      await p.goBack().catch(() => {})
-      await p.waitForTimeout(1500)
-
-    } catch (e) {
-      console.log('[browser] Error processing', target.recipient, ':', e.message)
+    if (!rowClicked) {
+      console.log('[contractors] Could not find row for:', target.recipient)
+      contractors.push({ id: Date.now().toString(), name: target.recipient, account: '', bic: '', bank: '', inn: '' })
+      continue
     }
+
+    await p.waitForTimeout(2500)
+
+    // Extract from detail view — look for account and BIC anywhere in visible text
+    const detail = await p.evaluate(() => {
+      const text = document.body.innerText
+      const acc20 = text.match(/\b(\d{20})\b/g) || []
+      // Filter out own accounts (408178...) — look for recipient's account
+      // BIC: 9 digits starting with 04
+      const bicM = text.match(/(?:БИК|BIC)[^\d]*(\d{9})/i) || text.match(/\b(04\d{7})\b/)
+      // Bank name
+      const bankLines = text.split('\n').filter(l => /банк|банка/i.test(l) && l.trim().length < 80)
+      // INN
+      const innM = text.match(/(?:ИНН)[^\d]*(\d{10,12})/i)
+      return {
+        accounts: [...new Set(acc20)],
+        bic: bicM ? bicM[1] : '',
+        bank: bankLines[0] ? bankLines[0].replace(/банк получателя:?\s*/i, '').trim() : '',
+        inn: innM ? innM[1] : '',
+        textSnip: text.substring(0, 600),
+      }
+    })
+
+    console.log('[contractors] Detail for', target.recipient, ':', JSON.stringify({ bic: detail.bic, accounts: detail.accounts.slice(0,3), bank: detail.bank }))
+
+    // Pick the most likely recipient account (not the payer's own accounts)
+    const ownAccounts = new Set(cachedAccounts.map(a => a.number))
+    const recipientAccount = detail.accounts.find(a => !ownAccounts.has(a)) || ''
+
+    contractors.push({
+      id: target.recipient.replace(/[^a-zA-Zа-яА-Я0-9]/g, '_').substring(0, 40),
+      name: target.recipient,
+      account: recipientAccount,
+      bic: detail.bic,
+      bank: detail.bank,
+      inn: detail.inn,
+    })
+
+    // Close detail and go back to list — try pressing Escape or clicking back button
+    await p.evaluate(() => {
+      // Try to find and click a back/close button
+      const btns = Array.from(document.querySelectorAll('button, [role="button"], a'))
+      const back = btns.find(b => /назад|back|закр|close|←|‹/i.test(b.textContent || b.getAttribute('aria-label') || ''))
+      if (back) { back.click(); return }
+      // Otherwise press browser back
+      window.history.back()
+    })
+    await p.waitForTimeout(1500)
   }
 
-  console.log('[browser] Extracted', contractors.length, 'contractors')
+  console.log('[contractors] Returning', contractors.length, 'contractors:', contractors.map(c => c.name))
   return contractors
 }
+
 
 
 async function submitPayment(username, password, paymentData) {
