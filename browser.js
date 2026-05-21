@@ -1084,20 +1084,17 @@ async function getContractorsFromHistory(username, password) {
   // Self-transfer names to exclude
   const selfNames = /ПОПЕНКОВ|ПАО КБ|ЦЕНТР-ИНВЕСТ|корп\.карта|р\/с Ставрополь/i
 
-  // Aggregate by recipient name
+  // Aggregate by recipient name — include both directions (incoming = client, outgoing = supplier)
   const byName = {}
   for (const pay of payments) {
     const name = (pay.recipient || '').trim()
     if (!name || selfNames.test(name)) continue
-    if (pay.amount >= 0) continue  // Only outgoing payments have real recipients
-    if (!byName[name]) byName[name] = { name, count: 0, lastAmount: 0, lastDate: '' }
+    if (!byName[name]) byName[name] = { name, count: 0 }
     byName[name].count++
-    byName[name].lastAmount = Math.abs(pay.amount)
-    byName[name].lastDate = pay.date
   }
 
   const targets = Object.values(byName).sort((a, b) => b.count - a.count)
-  console.log('[contractors] Unique outgoing recipients:', targets.length, targets.map(t => t.name))
+  console.log('[contractors] Unique external counterparties:', targets.length, targets.map(t => t.name))
 
   if (targets.length === 0) return []
 
