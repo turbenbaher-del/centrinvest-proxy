@@ -1246,4 +1246,110 @@ async function submitPayment(username, password, paymentData) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, closeBrowser }
+async function downloadStatement(username, password, { account = '', dateFrom, dateTo, format = 'pdf' }) {
+  const fs = require('fs')
+  const path = require('path')
+  const os = require('os')
+
+  const p = await ensureLoggedIn(username, password)
+
+  // Dismiss modal
+  await p.evaluate(() => {
+    const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+    if (modal) {
+      const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
+      const last = btns[btns.length - 1]
+      if (last) last.click(); else modal.remove()
+    }
+  })
+  await p.waitForTimeout(800)
+
+  // Navigate to statement section
+  try { await p.click('text=Счета и платежи', { timeout: 5000 }); await p.waitForTimeout(2000) } catch (e) {
+    console.log('[statement] nav1 fail:', e.message)
+  }
+  try { await p.click('text=Выписка', { timeout: 5000 }); await p.waitForTimeout(2000) } catch (e) {
+    console.log('[statement] nav2 fail:', e.message)
+  }
+
+  console.log('[statement] URL after nav:', p.url())
+
+  // Set date range via DOM evaluation
+  if (dateFrom || dateTo) {
+    await p.evaluate(({ from, to }) => {
+      const allInputs = Array.from(document.querySelectorAll('input'))
+      const dateInputs = allInputs.filter(i =>
+        i.type === 'date' ||
+        /дата|date|от|по|нач|кон/i.test(i.placeholder || '') ||
+        /дата|date|от|по|нач|кон/i.test((i.closest('label,div')?.textContent || ''))
+      )
+      const setVal = (el, val) => {
+        if (!el || !val) return
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+        if (nativeInputValueSetter) nativeInputValueSetter.call(el, val)
+        else el.value = val
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+      if (dateInputs[0] && from) setVal(dateInputs[0], from)
+      if (dateInputs[1] && to) setVal(dateInputs[1], to)
+    }, { from: dateFrom, to: dateTo })
+    await p.waitForTimeout(500)
+  }
+
+  // Select format if a selector exists
+  const fmtLabels = { pdf: 'PDF', xlsx: 'Excel', csv: 'CSV', '1c': '1С' }
+  const targetLabel = fmtLabels[format] || 'PDF'
+  await p.evaluate((lbl) => {
+    const els = Array.from(document.querySelectorAll('button, [role="option"], [role="menuitem"], option, label, span'))
+    for (const el of els) {
+      const t = (el.textContent || '').trim()
+      if (t === lbl || t.toUpperCase() === lbl.toUpperCase()) { el.click(); return true }
+    }
+    return false
+  }, targetLabel)
+  await p.waitForTimeout(300)
+
+  // Find and click the download button, capture the file
+  const dlDir = os.tmpdir()
+  await p.context().route('**', route => route.continue())
+
+  let downloadPath = null
+  let suggestedFilename = `statement_${dateFrom || 'all'}_${dateTo || 'all'}.${format}`
+
+  // Try using Playwright download event
+  try {
+    const [download] = await Promise.all([
+      p.waitForEvent('download', { timeout: 25000 }),
+      p.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button, a'))
+        const btn = btns.find(b => /скачат|выгруз|экспорт|download|print/i.test(b.textContent || b.title || ''))
+        if (btn) { btn.click(); return (btn.textContent || '').trim() }
+        return null
+      })
+    ])
+    const tmpPath = path.join(dlDir, `statement_${Date.now()}.tmp`)
+    await download.saveAs(tmpPath)
+    suggestedFilename = download.suggestedFilename() || suggestedFilename
+    downloadPath = tmpPath
+    console.log('[statement] Downloaded via event:', suggestedFilename, 'size:', fs.statSync(tmpPath).size)
+  } catch (e) {
+    console.log('[statement] Download event failed:', e.message)
+    // Fallback: intercept via network response
+    throw new Error('Кнопка скачивания не найдена или загрузка не запустилась: ' + e.message)
+  }
+
+  const buffer = fs.readFileSync(downloadPath)
+  try { fs.unlinkSync(downloadPath) } catch {}
+
+  const mimeTypes = {
+    pdf:  'application/pdf',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    csv:  'text/csv; charset=utf-8',
+    '1c': 'text/plain; charset=windows-1251',
+  }
+
+  return { buffer, filename: suggestedFilename, mimeType: mimeTypes[format] || 'application/octet-stream' }
+}
+
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, closeBrowser }

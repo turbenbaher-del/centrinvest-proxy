@@ -1,6 +1,6 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, closeBrowser } = require('./browser')
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -142,6 +142,20 @@ app.get('/debug/accounts-dom', async (req, res) => {
     const data = await getAccountsDomDebug(USERNAME, PASSWORD)
     res.json({ success: true, data })
   } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+app.get('/api/statement', async (req, res) => {
+  const { account = '', dateFrom, dateTo, format = 'pdf' } = req.query
+  try {
+    const { buffer, filename, mimeType } = await downloadStatement(USERNAME, PASSWORD, { account, dateFrom, dateTo, format })
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`)
+    res.setHeader('Content-Type', mimeType)
+    res.setHeader('Content-Length', buffer.length)
+    res.send(buffer)
+  } catch (err) {
+    console.error('[statement]', err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })
