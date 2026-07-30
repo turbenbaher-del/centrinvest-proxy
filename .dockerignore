@@ -1,3 +1,15 @@
 node_modules
 *.log
 .env
+
+# Рабочие артефакты разведки с РЕАЛЬНЫМИ банковскими данными:
+# в образ они попадать не должны (Dockerfile делает COPY . .)
+.git
+.session.json
+.deviceid
+_token.txt
+_*.xml
+_*.json
+_*.png
+recon-documents.json
+docs
