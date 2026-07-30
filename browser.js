@@ -60,15 +60,56 @@ async function ensureLoggedIn(username, password) {
   await page.click('#submitButton')
 
   await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 30000, waitUntil: 'commit' })
-  await page.waitForTimeout(2500)
+  await waitForAppReady(page)
 
   console.log('[browser] Logged in, URL:', page.url())
   sessionExpiry = Date.now() + 20 * 60 * 1000
   return page
 }
 
+/**
+ * Ждём, пока SPA банка действительно отрисует содержимое.
+ *
+ * Раньше здесь стояла пауза в 2,5 секунды. На машине с российским каналом этого
+ * хватало, а с хостинга — нет: чтение начиналось по пустой странице, и наружу
+ * уходил ответ «счетов 0» вместо ошибки. Теперь ждём появления содержимого,
+ * а по истечении срока честно пишем в лог, что страница осталась пустой.
+ */
+async function waitForAppReady(p, timeoutMs = 60000) {
+  const started = Date.now()
+  const MARKERS = /Счета и платежи|СОБСТВЕННЫЕ СРЕДСТВА|Контрагенты|Мои документы/i
+
+  while (Date.now() - started < timeoutMs) {
+    // Модальное окно «обязательно к прочтению» перекрывает интерфейс и мешает отрисовке
+    try {
+      await p.evaluate(() => {
+        const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (m) {
+          const bs = Array.from(m.querySelectorAll('button,[role=button]'))
+          const b = bs[bs.length - 1]; if (b) b.click(); else m.remove()
+        }
+      })
+    } catch {}
+
+    const text = await p.evaluate(() => document.body.innerText || '').catch(() => '')
+    if (text.length > 300 && MARKERS.test(text)) {
+      console.log(`[browser] Интерфейс отрисован за ${Math.round((Date.now() - started) / 1000)} c`)
+      return true
+    }
+    await p.waitForTimeout(1500)
+  }
+
+  const len = await p.evaluate(() => (document.body.innerText || '').length).catch(() => 0)
+  console.warn(`[browser] Интерфейс не отрисовался за ${timeoutMs / 1000} c (текста на странице: ${len} символов)`)
+  return false
+}
+
 async function getAccountsData(username, password) {
   const p = await ensureLoggedIn(username, password)
+  // Если интерфейс банка не отрисовался, читать нечего: лучше вернуть ошибку,
+  // чем пустой список — «счетов 0» выглядит как достоверный ответ.
+  const ready = await waitForAppReady(p, 45000)
+  if (!ready) throw new Error('Интерфейс ДБО не загрузился — банк не отдал содержимое страницы')
   const currentUrl = p.url()
   console.log('[browser] Getting accounts from:', currentUrl)
 
