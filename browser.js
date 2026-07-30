@@ -1701,6 +1701,126 @@ async function getSectionData(username, password, key) {
 }
 
 /**
+ * Документы из структурного интерфейса ДБО.
+ *
+ * В отличие от разбора текста выписки (getPaymentsData) здесь у каждого документа
+ * есть идентификатор банка, настоящий статус, номер и назначение — банк отдаёт
+ * платежи отдельными формами на каждый статус: ui/payments/draft, partlySigned,
+ * inProcess, completed, canceled.
+ *
+ * Важно: это исходящие документы клиента. Входящие поступления сюда не попадают —
+ * они видны только в выписке.
+ *
+ * Только чтение: переходы по вкладкам статусов, никаких действий над документами.
+ */
+const PAYMENT_FORMS = {
+  'ui/payments/draft':         { status: 'ЧЕРНОВИК',    tab: 'Черновики' },
+  'ui/payments/partlySigned':  { status: 'НА ПОДПИСЬ',  tab: 'На подпись' },
+  'ui/payments/inProcess':     { status: 'В ОБРАБОТКЕ', tab: 'В обработке' },
+  'ui/payments/canceled':      { status: 'ОТКЛОНЕН',    tab: 'Отклоненные' },
+  'ui/payments/completed':     { status: 'ИСПОЛНЕН',    tab: 'Выполненные' },
+}
+
+/** Поля сетки приходят то простым значением, то обёрткой {value: …}. */
+const fieldValue = (x) => {
+  if (x && typeof x === 'object' && !Array.isArray(x) && 'value' in x) return x.value
+  return x
+}
+
+const toAmount = (x) => {
+  const raw = String(fieldValue(x) ?? '').replace(/\s/g, '').replace(',', '.')
+  const n = parseFloat(raw)
+  return Number.isFinite(n) ? n : 0
+}
+
+async function getDocuments(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  const ready = await waitForAppReady(p, 45000)
+  if (!ready) throw new Error('Интерфейс ДБО не загрузился — банк не отдал содержимое страницы')
+
+  const bodies = []
+  const onResp = async (r) => {
+    try {
+      const u = r.url()
+      if (!u.includes('/api/v1')) return
+      if (r.status() !== 200) return
+      if (!(r.headers()['content-type'] || '').includes('json')) return
+      const body = await r.text()
+      if (body.length > 100) bodies.push(body)
+    } catch {}
+  }
+  p.on('response', onResp)
+
+  const dismiss = async () => {
+    try {
+      await p.evaluate(() => {
+        const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (m) {
+          const bs = Array.from(m.querySelectorAll('button,[role=button]'))
+          const b = bs[bs.length - 1]; if (b) b.click(); else m.remove()
+        }
+      })
+    } catch {}
+  }
+
+  // Открываем платежи и проходим по вкладкам статусов — каждая отдаёт свою форму
+  const visited = []
+  for (const label of ['Платежи', ...Object.values(PAYMENT_FORMS).map(f => f.tab)]) {
+    try {
+      await dismiss()
+      await p.click(`text=${label}`, { timeout: 3000 })
+      await p.waitForTimeout(2500)
+      visited.push(label)
+    } catch {}
+  }
+  await p.waitForTimeout(1500)
+  p.off('response', onResp)
+
+  const documents = []
+  const seen = new Set()
+
+  for (const body of bodies) {
+    let parsed
+    try { parsed = JSON.parse(body) } catch { continue }
+    for (const cmd of (parsed.commands || [])) {
+      const form = PAYMENT_FORMS[cmd.instanceName || '']
+      if (!form) continue
+
+      const items = cmd.fields?.payments?.items
+      if (!Array.isArray(items)) continue
+
+      for (const it of items) {
+        const id = String(fieldValue(it.id) ?? '')
+        if (!id || seen.has(id)) continue
+        seen.add(id)
+
+        // Статус берём из самого документа, а вкладку используем как запасной вариант
+        const stateName = String(fieldValue(it.stateName) ?? '').trim()
+
+        documents.push({
+          id,
+          number: String(fieldValue(it.docNumber) ?? '').trim(),
+          account: String(fieldValue(it.payerAccount) ?? '').replace(/\D/g, ''),
+          recipient: String(fieldValue(it.receiverName) ?? '').trim(),
+          purpose: String(fieldValue(it.paymentPurpose) ?? '').trim(),
+          // Документы в этих формах — исходящие, поэтому сумма со знаком минус
+          amount: -Math.abs(toAmount(it.documentSum)),
+          direction: 'out',
+          status: stateName || form.status,
+          stateCode: String(fieldValue(it.stateCode) ?? '').trim(),
+          form: cmd.instanceName,
+          // Что банк разрешает делать с этим документом
+          actions: Array.isArray(it.actions) ? it.actions : Object.keys(it.actions || {}),
+        })
+      }
+    }
+  }
+
+  console.log(`[documents] вкладок пройдено: ${visited.length}, документов: ${documents.length}`)
+  return documents
+}
+
+/**
  * Разведка документного API: ищем, каким запросом банк отдаёт список документов
  * с идентификаторами и какие действия над ними доступны (подпись, удаление).
  * Сейчас платежи снимаются парсингом текста выписки, где id нет вовсе, —
@@ -1824,4 +1944,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, closeBrowser }
