@@ -1659,4 +1659,97 @@ async function getSectionData(username, password, key) {
   return sectionCache[key] || result
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, closeBrowser }
+/**
+ * Разведка документного API: ищем, каким запросом банк отдаёт список документов
+ * с идентификаторами и какие действия над ними доступны (подпись, удаление).
+ * Сейчас платежи снимаются парсингом текста выписки, где id нет вовсе, —
+ * поэтому подпись и удаление документов ДБО невозможны.
+ *
+ * ТОЛЬКО ЧТЕНИЕ: переходим по разделам документов и записываем трафик /api/v1.
+ * Кнопки подписи, отправки и удаления не нажимаются — деньги не двигаются.
+ */
+async function reconDocuments(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  const traffic = []
+
+  const onResp = async (r) => {
+    try {
+      const u = r.url()
+      if (!u.includes('/api/v1') && !u.includes('/api-ui')) return
+      if (r.status() !== 200) return
+      if (!(r.headers()['content-type'] || '').includes('json')) return
+      const body = await r.text()
+      if (body.length < 50) return
+      traffic.push({
+        url: u.replace('https://dbo.centrinvest.ru', ''),
+        method: r.request().method(),
+        size: body.length,
+        body,
+      })
+    } catch {}
+  }
+  p.on('response', onResp)
+
+  const dismiss = async () => {
+    try {
+      await p.evaluate(() => {
+        const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (m) {
+          const bs = Array.from(m.querySelectorAll('button,[role=button]'))
+          const b = bs[bs.length - 1]; if (b) b.click(); else m.remove()
+        }
+      })
+    } catch {}
+  }
+
+  await p.waitForTimeout(1200)
+  await dismiss()
+
+  const visited = []
+  for (const label of ['Платежи', 'Черновики', 'На подпись', 'В обработке', 'Отклоненные', 'Выполненные']) {
+    try {
+      await dismiss()
+      await p.click(`text=${label}`, { timeout: 3000 })
+      await p.waitForTimeout(2500)
+      visited.push(label)
+    } catch {}
+  }
+  await p.waitForTimeout(1500)
+  p.off('response', onResp)
+
+  // Что в ответах похоже на идентификаторы документов и действия над ними
+  const idKeys = new Set()
+  const idSamples = []
+  const actions = new Set()
+  const instances = new Set()
+
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    for (const [k, v] of Object.entries(node)) {
+      if (/^(id|documentId|docId|uid|guid|instanceToken)$/i.test(k) && (typeof v === 'string' || typeof v === 'number')) {
+        idKeys.add(k)
+        if (idSamples.length < 20) idSamples.push({ key: k, value: String(v).slice(0, 60) })
+      }
+      if (k === 'actions' && v && typeof v === 'object' && !Array.isArray(v)) {
+        Object.keys(v).forEach(a => actions.add(a))
+      }
+      if (k === 'instanceName' && typeof v === 'string') instances.add(v)
+      walk(v)
+    }
+  }
+  for (const t of traffic) { try { walk(JSON.parse(t.body)) } catch {} }
+
+  return {
+    visitedSections: visited,
+    responses: traffic.length,
+    endpoints: [...new Set(traffic.map(t => `${t.method} ${t.url.split('?')[0]}`))].sort(),
+    idKeys: [...idKeys],
+    idSamples,
+    // Здесь ищем что-то вроде _sign, _delete, _remove — это и есть ключ к подписи
+    actions: [...actions].sort(),
+    instances: [...instances].sort().slice(0, 150),
+  }
+}
+
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, closeBrowser }

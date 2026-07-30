@@ -1,6 +1,6 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, closeBrowser } = require('./browser')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -217,6 +217,19 @@ app.post('/api/transfer-own', async (req, res) => {
   } catch (err) {
     console.error('[transfer-own]', err.message)
     res.status(500).json({ success:false, error: err.message })
+  }
+})
+
+// Разведка документного API — нужна, чтобы понять, возможны ли подпись и
+// удаление документов из приложения. Только чтение трафика, ничего не нажимает.
+// Отдаёт сводку (эндпоинты, ключи-идентификаторы, действия), а не сами данные.
+app.get('/api/recon/documents', async (_, res) => {
+  try {
+    const data = await reconDocuments(USERNAME, PASSWORD)
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[recon]', err.message)
+    res.status(500).json({ success: false, error: err.message })
   }
 })
 
