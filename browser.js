@@ -1905,7 +1905,7 @@ async function reconDocuments(username, password) {
   // Нужен, чтобы понять, где лежит идентификатор документа и какие действия
   // доступны у конкретной строки — по этому строится подпись и удаление.
   const skeleton = (node, depth = 0) => {
-    if (depth > 4) return '…'
+    if (depth > 7) return "…"
     if (node === null) return 'null'
     if (Array.isArray(node)) {
       return node.length ? [`массив(${node.length})`, skeleton(node[0], depth + 1)] : 'массив(0)'
