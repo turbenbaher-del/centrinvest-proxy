@@ -1778,45 +1778,59 @@ async function getDocuments(username, password) {
 
   const documents = []
   const seen = new Set()
+  const keyShapes = new Set()
 
-  for (const body of bodies) {
-    let parsed
-    try { parsed = JSON.parse(body) } catch { continue }
-    for (const cmd of (parsed.commands || [])) {
-      const form = PAYMENT_FORMS[cmd.instanceName || '']
-      if (!form) continue
+  // Банк присылает поля формы то объектом, то массивом изменений, а имена полей
+  // у разных вкладок отличаются. Поэтому ищем строки документов по признакам,
+  // а не по фиксированному пути.
+  const looksLikeDocument = (o) =>
+    o && typeof o === 'object' && !Array.isArray(o) &&
+    ('id' in o) &&
+    ('docNumber' in o || 'documentSum' in o || 'stateName' in o || 'receiverName' in o)
 
-      const items = cmd.fields?.payments?.items
-      if (!Array.isArray(items)) continue
+  const pick = (o, ...names) => {
+    for (const n of names) {
+      const v = fieldValue(o[n])
+      if (v !== undefined && v !== null && String(v).trim() !== '') return v
+    }
+    return ''
+  }
 
-      for (const it of items) {
-        const id = String(fieldValue(it.id) ?? '')
-        if (!id || seen.has(id)) continue
+  const collect = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(collect); return }
+
+    if (looksLikeDocument(node)) {
+      const id = String(fieldValue(node.id) ?? '')
+      if (id && !seen.has(id)) {
         seen.add(id)
-
-        // Статус берём из самого документа, а вкладку используем как запасной вариант
-        const stateName = String(fieldValue(it.stateName) ?? '').trim()
-
+        keyShapes.add(Object.keys(node).sort().join(','))
         documents.push({
           id,
-          number: String(fieldValue(it.docNumber) ?? '').trim(),
-          account: String(fieldValue(it.payerAccount) ?? '').replace(/\D/g, ''),
-          recipient: String(fieldValue(it.receiverName) ?? '').trim(),
-          purpose: String(fieldValue(it.paymentPurpose) ?? '').trim(),
-          // Документы в этих формах — исходящие, поэтому сумма со знаком минус
-          amount: -Math.abs(toAmount(it.documentSum)),
+          number:    String(pick(node, 'docNumber', 'number')).trim(),
+          account:   String(pick(node, 'payerAccount', 'account', 'accountNumber')).replace(/\D/g, ''),
+          recipient: String(pick(node, 'receiverName', 'receiver', 'correspondentName', 'payeeName')).trim(),
+          purpose:   String(pick(node, 'paymentPurpose', 'purpose', 'description')).trim(),
+          // Документы этих форм — исходящие, поэтому сумма со знаком минус
+          amount:   -Math.abs(toAmount(pick(node, 'documentSum', 'sum', 'amount'))),
           direction: 'out',
-          status: stateName || form.status,
-          stateCode: String(fieldValue(it.stateCode) ?? '').trim(),
-          form: cmd.instanceName,
-          // Что банк разрешает делать с этим документом
-          actions: Array.isArray(it.actions) ? it.actions : Object.keys(it.actions || {}),
+          status:    String(pick(node, 'stateName', 'state', 'statusName')).trim() || 'НЕИЗВЕСТЕН',
+          stateCode: String(pick(node, 'stateCode', 'statusCode')).trim(),
+          actions:   Array.isArray(node.actions) ? node.actions : Object.keys(node.actions || {}),
         })
       }
     }
+
+    for (const v of Object.values(node)) collect(v)
+  }
+
+  for (const body of bodies) {
+    try { collect(JSON.parse(body)) } catch {}
   }
 
   console.log(`[documents] вкладок пройдено: ${visited.length}, документов: ${documents.length}`)
+  console.log(`[documents] встреченные наборы полей: ${[...keyShapes].length}`)
+  ;[...keyShapes].forEach(s => console.log('  ' + s))
   return documents
 }
 
