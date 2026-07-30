@@ -12,8 +12,12 @@ const MAIN_URL = `${BASE}/main.zul`
 
 async function getBrowser() {
   if (!browser || !browser.isConnected()) {
+    // Банк гео-блокирует иностранные IP → ходим через российский выход (SOCKS).
+    // BANK_SOCKS, напр. socks5://127.0.0.1:10810 (локальный xray на RU-сервер RedShield).
+    const socks = process.env.BANK_SOCKS
     browser = await chromium.launch({
       headless: true,
+      ...(socks ? { proxy: { server: socks } } : {}),
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -23,6 +27,7 @@ async function getBrowser() {
         '--no-zygote',
       ],
     })
+    if (socks) console.log('[browser] via SOCKS', socks)
   }
   return browser
 }
@@ -45,14 +50,17 @@ async function ensureLoggedIn(username, password) {
   })
   page = await ctx.newPage()
 
-  await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
-  try { await page.click('#btn', { timeout: 2000 }) } catch {}
-  await page.fill('#userName', username.toLowerCase())
-  await page.fill('#password', password)
+  // Сервер держит соединение открытым (стримит) → ждём только commit, а форму — по селектору.
+  await page.goto(LOGIN_URL, { waitUntil: 'commit', timeout: 30000 })
+  await page.waitForSelector('#userName', { timeout: 30000, state: 'attached' })
+  // '#btn' раскрывает форму «вход по логину/паролю» (поля скрыты до клика)
+  try { await page.click('#btn', { timeout: 3000 }) } catch {}
+  await page.fill('#userName', username.toLowerCase(), { timeout: 15000 })
+  await page.fill('#password', password, { timeout: 15000 })
   await page.click('#submitButton')
 
-  await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 25000, waitUntil: 'domcontentloaded' })
-  await page.waitForTimeout(2000)
+  await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 30000, waitUntil: 'commit' })
+  await page.waitForTimeout(2500)
 
   console.log('[browser] Logged in, URL:', page.url())
   sessionExpiry = Date.now() + 20 * 60 * 1000
@@ -239,22 +247,26 @@ function parsePaymentLines(text) {
     if (!dateRe.test(lines[i])) { i++; continue }
     const date = lines[i]; i++
 
-    let docNum = '', counterparty = '', desc = '', amount = 0
+    let docNum = '', counterparty = '', desc = '', amount = 0, amountStr = '', status = ''
     const chunk = []
     while (i < lines.length && !dateRe.test(lines[i]) && !amtRe.test(lines[i])) {
       chunk.push(lines[i]); i++
     }
     if (i < lines.length && amtRe.test(lines[i])) {
       const m = lines[i].match(amtRe)
-      amount = parseFloat((m[1] || '0').replace(/\s/g, '').replace(',', '.')) || 0
+      amountStr = (m[1] || '0').trim()
+      amount = parseFloat(amountStr.replace(/\s/g, '').replace(',', '.')) || 0
       i++
     }
 
     for (const line of chunk) {
       if (/^№\s*[\d\/\-]+,?$/.test(line)) {
         docNum = line.replace(/^№\s*/, '').replace(/,$/, '').trim()
-      } else if (/^(ГО|ИСПОЛНЕН|ОТКЛОНЕН|ЧЕРНОВИК|НА ПОДПИСЬ|В ОБРАБОТКЕ)$/.test(line)) {
-        // status — skip
+      } else if (/^(ГО|ИСПОЛНЕН|ВЫПОЛНЕН|ОТКЛОНЕН|ОТКЛОНЁН|ЧЕРНОВИК|НА ПОДПИСЬ|В ОБРАБОТКЕ)$/i.test(line)) {
+        // Статус документа: раньше строка отбрасывалась и всем операциям
+        // жёстко ставился 'executed' — из-за этого фильтры ДБО (черновики,
+        // на подпись, в обработке, отклонённые) были неработоспособны.
+        status = line.toUpperCase()
       } else if (/^счет /i.test(line) || line === ' ') {
         // skip
       } else if (!counterparty) {
@@ -264,11 +276,35 @@ function parsePaymentLines(text) {
       }
     }
 
-    if (amount !== 0 && counterparty && !counterparty.startsWith('От:')) {
+    // Направление операции. Если выписка сама дала знак суммы («+2.00 ₽»), он и есть
+    // истина: эвристика по префиксу «От:» в новом интерфейсе есть далеко не всегда,
+    // и поступления помечались списаниями.
+    const byPrefix = /^От:/i.test(counterparty)
+    counterparty = counterparty.replace(/^(От|Кому)\s*:\s*/i, '').trim()
+    const hadSign = /^[+\-]/.test(amountStr)
+    const isIncoming = hadSign ? amount > 0 : byPrefix
+    if (!hadSign && amount !== 0) {
+      amount = isIncoming ? Math.abs(amount) : -Math.abs(amount)
+    }
+
+    if (amount !== 0 && counterparty) {
       const key = `${date}|${docNum}|${amount}`
       if (!seen.has(key)) {
         seen.add(key)
-        payments.push({ date, number: docNum, recipient: counterparty, amount, status: 'executed' })
+        payments.push({
+          // Устойчивый идентификатор операции: банк не отдаёт id документа
+          // в выписке, поэтому собираем ключ из даты, номера и суммы.
+          id: key,
+          date,
+          number: docNum,
+          recipient: counterparty,
+          amount,
+          direction: isIncoming ? 'in' : 'out',
+          // 'ГО' в выписке = «исполнен банком»; если статус не нашёлся, операция
+          // уже в выписке, значит проведена.
+          status: status || 'ИСПОЛНЕН',
+          purpose: desc,
+        })
       }
     }
   }
@@ -362,7 +398,13 @@ async function getPaymentsViaResponseListener(p) {
   }
   const domPayments = await scrollAndParse()
   if (domPayments.length > 0) {
-    console.log('[browser] Got', domPayments.length, 'payments from DOM text (new interface)')
+    // Тегируем операции счётом выписки (20-значный номер из DOM)
+    const acct = await p.evaluate(() => {
+      const m = document.body.innerText.match(/\b(4\d{19})\b/)
+      return m ? m[1] : ''
+    })
+    if (acct) domPayments.forEach(pm => { if (!pm.account) pm.account = acct })
+    console.log('[browser] Got', domPayments.length, 'payments from DOM text (new interface), account', acct)
     return domPayments
   }
 
@@ -1352,4 +1394,269 @@ async function downloadStatement(username, password, { account = '', dateFrom, d
   return { buffer, filename: suggestedFilename, mimeType: mimeTypes[format] || 'application/octet-stream' }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, closeBrowser }
+// Реальные тарифы/лимиты: открываем экран «Продукты → Тарифы» и вынимаем поля label→value.
+// Перевод между своими счетами. sign=false → только черновик (деньги не уходят);
+// sign=true → «Подписать и отправить» (PayControl-пуш, деньги уходят после подтверждения на телефоне).
+// Реальный маппинг прозвище↔номер (счета ИП Попенкова)
+const OWN_ACCOUNTS = {
+  '40802810600000018205': 'ГО',
+  '40802810520000018686': 'корп.карта',
+  '40802810309500000228': 'р/с Ставрополь',
+}
+async function transferOwn(username, password, { fromAccount, toAccount, amount, purpose = '', sign = false }) {
+  const p = await ensureLoggedIn(username, password)
+  const log = (...a) => console.log('[transfer]', ...a)
+  // счёт может прийти номером ИЛИ прозвищем — нормализуем к прозвищу (форма показывает прозвища)
+  const toAlias = (x) => OWN_ACCOUNTS[x] || x
+  const fromAliasName = toAlias(fromAccount)
+  const toAliasName = toAlias(toAccount)
+  const dismiss = async () => { try { await p.evaluate(() => { const m=document.querySelector('[data-at="modal-ui/messages/mustRead"]'); if(m){const bs=[...m.querySelectorAll('button,[role=button]')]; (bs[bs.length-1]||{click(){}}).click()} }) } catch {} }
+
+  await p.waitForTimeout(500); await dismiss()
+
+  // 1) навигация к форме перевода между своими счетами
+  for (const label of ['Оплатить', 'Создать', 'Перевод между своими счетами', 'Между своими счетами', 'Перевод между счетами']) {
+    try { await dismiss(); await p.click(`text=${label}`, { timeout: 2500 }); await p.waitForTimeout(2000); log('clicked', label) } catch {}
+  }
+  await p.waitForTimeout(1500); await dismiss()
+
+  const title = await p.title().catch(()=> '')
+  log('form title:', title)
+
+  // 2) выбрать счёт по ПРОЗВИЩУ (форма показывает «ГО – 151.09 ₽» и т.п.).
+  //    Открываем дропдаун JS-кликом (в обход перехвата span'ом), опцию тоже кликаем JS.
+  const pickAccount = async (fieldName, alias) => {
+    try {
+      // force-клик открывает дропдаун (в обход перехвата наложенным span'ом)
+      await p.click(`[name="${fieldName}"]`, { force: true, timeout: 5000 })
+      await p.waitForTimeout(1300)
+      const res = await p.evaluate((al) => {
+        const els = Array.from(document.querySelectorAll('[role="option"],li,[class*="option"],[class*="item"],div,span'))
+        const norm = e => (e.textContent || '').replace(/\s+/g, ' ').trim()
+        const el = els.find(e => { const t = norm(e); return t.length < 120 && t.startsWith(al) })
+        if (el) { el.click(); return { picked: norm(el).slice(0, 60) } }
+        // debug: собрать похожие на счета опции
+        const opts = [...new Set(els.map(norm).filter(t => t && t.length < 120 && /₽|р\/с|ГО|корп|счет|ЦЕНТР/i.test(t)))].slice(0, 12)
+        return { picked: null, opts }
+      }, alias)
+      const ok = !!res.picked
+      log('pick', fieldName, alias, '->', res.picked || ('NULL; opts=' + JSON.stringify(res.opts)))
+      if (!ok) { await p.keyboard.press('Escape').catch(() => {}) }
+      await p.waitForTimeout(900)
+      return !!ok
+    } catch (e) { log('pick fail', fieldName, e.message); return false }
+  }
+
+  await pickAccount('payerAccount', fromAliasName)
+  await pickAccount('receiverAccount', toAliasName)
+
+  // 3) сумма + назначение (обычные инпуты)
+  const fill = async (name, val) => {
+    try { await p.fill(`[name="${name}"]`, String(val), { timeout: 4000 }); log('filled', name, val) }
+    catch (e) { log('fill fail', name, e.message) }
+  }
+  await fill('documentSum', amount)
+  if (purpose) await fill('paymentPurpose', purpose)
+  await p.waitForTimeout(800)
+
+  // 4) снять состояние формы
+  const formState = await p.evaluate(() => {
+    const q = (s) => Array.from(document.querySelectorAll(s))
+    const val = (n) => { const e=document.querySelector(`[name="${n}"]`); return e ? (e.value || e.textContent || '') : null }
+    return { payer: val('payerAccount'), receiver: val('receiverAccount'), sum: val('documentSum'), purpose: val('paymentPurpose') }
+  })
+  log('form state:', JSON.stringify(formState))
+
+  // 5) сохранить черновик или подписать+отправить
+  const btnLabel = sign ? 'Подписать и отправить' : 'Сохранить'
+  let clicked = null
+  try {
+    clicked = await p.evaluate((lbl) => {
+      const bs = Array.from(document.querySelectorAll('button,[role="button"],a'))
+      const b = bs.find(x => (x.textContent||'').trim().toLowerCase() === lbl.toLowerCase())
+        || bs.find(x => (x.textContent||'').trim().toLowerCase().includes(lbl.toLowerCase()))
+      if (b) { b.click(); return (b.textContent||'').trim() }
+      return null
+    }, btnLabel)
+    log('action button:', clicked)
+  } catch (e) { log('action fail', e.message) }
+  await p.waitForTimeout(sign ? 6000 : 3000)
+  await dismiss()
+
+  // 6) результат (текст экрана — статус/ошибка/запрос PayControl)
+  const result = await p.evaluate(() => (document.body.innerText || '').replace(/\s+/g,' ').slice(0, 1200))
+  return { formState, actionClicked: clicked, signed: !!sign, screen: result }
+}
+
+let cachedTariffs = []
+async function getTariffs(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  const bodies = []
+  const onResp = async (r) => {
+    try {
+      const u = r.url()
+      if (!(u.includes('/api/v1/execution') || u.includes('/api/v1/menu/click')) || r.status() !== 200) return
+      const ct = r.headers()['content-type'] || ''
+      if (!ct.includes('json')) return
+      const b = await r.text()
+      if (b.length > 100) bodies.push(b)
+    } catch {}
+  }
+  p.on('response', onResp)   // слушатель ДО навигации
+
+  const dismiss = async () => {
+    try {
+      await p.evaluate(() => {
+        const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (modal) {
+          const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
+          const b = btns[btns.length - 1]; if (b) b.click(); else modal.remove()
+        }
+      })
+    } catch {}
+  }
+
+  await p.waitForTimeout(1500)
+  await dismiss()
+
+  // Пройти к экрану тарифов прямо с текущего (post-login) экрана
+  for (const label of ['Продукты и услуги', 'Продукты', 'Тарифы и лимиты', 'Тарифы',
+    'Посмотреть подключенный тариф', 'Перейти в тарифы', 'Установка/Изменение лимитов', 'Ещё']) {
+    try {
+      await dismiss()
+      await p.click(`text=${label}`, { timeout: 2500 })
+      await p.waitForTimeout(2500)
+      console.log('[tariffs] clicked', label)
+    } catch {}
+  }
+  await p.waitForTimeout(1500)
+  p.off('response', onResp)
+
+  // Извлечь тарифные поля
+  const re = /(плата за|тариф|овердрафт|лимит|комисс|СБП)/i
+  const items = []
+  const seen = new Set()
+  const walk = (n) => {
+    if (n && typeof n === 'object') {
+      if (!Array.isArray(n)) {
+        const l = n.label, v = n.value
+        if (typeof l === 'string' && typeof v === 'string' && v.trim() && re.test(l) && !seen.has(l.trim())) {
+          seen.add(l.trim())
+          items.push({ label: l.trim(), value: v.trim() })
+        }
+        for (const k of Object.keys(n)) walk(n[k])
+      } else {
+        for (const x of n) walk(x)
+      }
+    }
+  }
+  for (const b of bodies) { try { walk(JSON.parse(b)) } catch {} }
+  console.log('[tariffs] parsed', items.length, 'fields from', bodies.length, 'execution responses')
+  // кэшируем последний удачный (тарифы стабильны); при слабом результате отдаём кэш
+  if (items.length >= 3) { cachedTariffs = items; return items }
+  return cachedTariffs.length ? cachedTariffs : items
+}
+
+// ─── Разделы ДБО ────────────────────────────────────────────────────────────
+// Обобщение приёма, на котором работают тарифы: слушаем JSON банка, проходим
+// по пунктам меню раздела и вытаскиваем пары «подпись — значение» + строки таблиц.
+// Так один механизм закрывает кредиты, депозиты, эквайринг, АУСН и т.п.
+const DBO_SECTIONS = {
+  credits:    { title: 'Мои кредиты',        labels: ['Мои кредиты', 'Кредиты'] },
+  deposits:   { title: 'Мои депозиты',       labels: ['Мои депозиты', 'Депозиты'] },
+  acquiring:  { title: 'Эквайринг',          labels: ['Эквайринг'] },
+  ausn:       { title: 'АУСН',               labels: ['АУСН', 'Инструкция АУСН'] },
+  salary:     { title: 'Зарплатный проект',  labels: ['Зарплатный проект', 'Зарплатный'] },
+  documents:  { title: 'Мои документы',      labels: ['Мои документы', 'Документы'] },
+  bonus:      { title: 'Бонус за партнёра',  labels: ['Бонус за партнера', 'Бонус за партнёра'] },
+  services:   { title: 'Сервисы',            labels: ['Сервисы'] },
+  products:   { title: 'Прочие продукты',    labels: ['Прочие продукты'] },
+  // Подразделы «Счетов и платежей»
+  bulk:       { title: 'Массовые платежи',   labels: ['Массовые платежи'] },
+  invoices:   { title: 'Счета на оплату',    labels: ['Счета на оплату'] },
+  stmtorders: { title: 'Запросы выписок',    labels: ['Запросы выписок'] },
+}
+
+const sectionCache = {}
+
+async function getSectionData(username, password, key) {
+  const section = DBO_SECTIONS[key]
+  if (!section) throw new Error('Неизвестный раздел: ' + key)
+
+  const p = await ensureLoggedIn(username, password)
+  const bodies = []
+  const onResp = async (r) => {
+    try {
+      const u = r.url()
+      if (!(u.includes('/api/v1/execution') || u.includes('/api/v1/menu/click')) || r.status() !== 200) return
+      if (!(r.headers()['content-type'] || '').includes('json')) return
+      const b = await r.text()
+      if (b.length > 100) bodies.push(b)
+    } catch {}
+  }
+  p.on('response', onResp)
+
+  const dismiss = async () => {
+    try {
+      await p.evaluate(() => {
+        const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (modal) {
+          const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
+          const b = btns[btns.length - 1]; if (b) b.click(); else modal.remove()
+        }
+      })
+    } catch {}
+  }
+
+  await p.waitForTimeout(1200)
+  await dismiss()
+
+  let navigated = false
+  for (const label of section.labels) {
+    try {
+      await dismiss()
+      await p.click(`text=${label}`, { timeout: 3000 })
+      await p.waitForTimeout(2500)
+      navigated = true
+      console.log(`[section:${key}] clicked`, label)
+      break
+    } catch {}
+  }
+  await p.waitForTimeout(1200)
+  p.off('response', onResp)
+
+  // Собираем все пары label/value — какие именно поля отдаёт раздел, заранее неизвестно
+  const fields = []
+  const seen = new Set()
+  const walk = (n) => {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) { n.forEach(walk); return }
+    const l = n.label, v = n.value
+    if (typeof l === 'string' && l.trim() && (typeof v === 'string' || typeof v === 'number')) {
+      const val = String(v).trim()
+      const kk = l.trim() + '=' + val
+      if (val && !seen.has(kk)) { seen.add(kk); fields.push({ label: l.trim(), value: val }) }
+    }
+    Object.keys(n).forEach(k => walk(n[k]))
+  }
+  for (const b of bodies) { try { walk(JSON.parse(b)) } catch {} }
+
+  // Текст экрана — чтобы показать раздел, даже если структурных полей банк не дал
+  const screenText = await p.evaluate(() => (document.body.innerText || '').slice(0, 4000)).catch(() => '')
+
+  const result = {
+    key,
+    title: section.title,
+    navigated,
+    fields,
+    screenText,
+    responses: bodies.length,
+  }
+
+  // Кэшируем последний непустой результат: разделы меняются редко,
+  // а навигация по DOM банка иногда не срабатывает с первого раза
+  if (fields.length > 0 || screenText.length > 200) sectionCache[key] = result
+  return sectionCache[key] || result
+}
+
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, closeBrowser }

@@ -1,18 +1,79 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, closeBrowser } = require('./browser')
+const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
 const PORT = process.env.PORT || 3001
 
-app.use(cors())
+// ─── Доступы ────────────────────────────────────────────────────────────────
+// Креды ДБО берём ТОЛЬКО из окружения. Раньше здесь стояли боевые значения
+// по умолчанию — на публичном хостинге это отдавало счёта и выписки любому,
+// кто знал адрес сервиса.
+const USERNAME = process.env.DBO_LOGIN
+const PASSWORD = process.env.DBO_PASSWORD
+const CONFIGURED = !!(USERNAME && PASSWORD)
+if (!CONFIGURED) {
+  // Не падаем: иначе деплой уходит в бесконечный перезапуск и сервис недоступен целиком.
+  // Поднимаемся, но на все банковские запросы честно отвечаем 503.
+  console.error('[fatal] Не заданы DBO_LOGIN и DBO_PASSWORD. Задайте их в переменных окружения (на Railway — Variables).')
+}
+
+// Токен доступа к самому прокси: без него любой запрос отклоняется.
+// Если не задан — сервис поднимется, но громко предупредит.
+const ACCESS_TOKEN = process.env.PROXY_TOKEN || ''
+if (!ACCESS_TOKEN) {
+  console.warn('[warn] PROXY_TOKEN не задан — прокси открыт без авторизации. Задайте его и передавайте в PWA через VITE_PROXY_TOKEN.')
+}
+
+// CORS только для доверенных origin'ов вместо «разрешаем всем».
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+
+app.use(cors({
+  origin(origin, cb) {
+    // Запросы без Origin (curl, серверные) не блокируем — их отсекает токен.
+    if (!origin) return cb(null, true)
+    if (ALLOWED_ORIGINS.length === 0) return cb(null, true)
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true)
+    cb(new Error('Origin не разрешён: ' + origin))
+  },
+  credentials: true,
+}))
 app.use(express.json())
 
-const USERNAME = process.env.DBO_LOGIN    || '24cmvKy8'
-const PASSWORD = process.env.DBO_PASSWORD || 'dbocib14Z'
+// Проверка токена. /health оставляем открытым — по нему хостинг следит за живостью.
+app.use((req, res, next) => {
+  if (!ACCESS_TOKEN) return next()
+  if (req.path === '/health' || req.method === 'OPTIONS') return next()
+
+  const header = req.get('authorization') || ''
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : ''
+  const token = bearer || req.get('x-proxy-token') || ''
+  if (token !== ACCESS_TOKEN) {
+    return res.status(401).json({ success: false, error: 'Недействительный токен доступа' })
+  }
+  next()
+})
 
 app.get('/health', (_, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString() })
+  res.json({
+    status: CONFIGURED ? 'ok' : 'misconfigured',
+    // Видно в мониторинге, что сервис жив, но креды ДБО не заданы
+    dboConfigured: CONFIGURED,
+    time: new Date().toISOString(),
+  })
+})
+
+// Без кредов ДБО банковские маршруты отвечают понятной ошибкой, а не падают
+app.use((req, res, next) => {
+  if (CONFIGURED || req.path === '/health' || req.method === 'OPTIONS') return next()
+  res.status(503).json({
+    success: false,
+    error: 'Прокси не настроен: не заданы DBO_LOGIN и DBO_PASSWORD',
+  })
 })
 
 app.post('/api/login', async (req, res) => {
@@ -49,11 +110,44 @@ app.get('/api/payments', async (req, res) => {
   }
 })
 
+// Один документ по идентификатору. Банк не отдаёт выписку постранично с id,
+// поэтому ищем операцию в свежем списке по её устойчивому ключу (дата|номер|сумма).
+app.get('/api/payments/:id', async (req, res) => {
+  try {
+    const list = await getPaymentsData(USERNAME, PASSWORD)
+    const found = (list || []).find(p => p.id === req.params.id)
+    if (!found) return res.status(404).json({ success: false, error: 'Операция не найдена в выписке' })
+    res.json({ success: true, data: found })
+  } catch (err) {
+    console.error('[payment by id]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Map the PWA payment payload → webpay fields.
+function mapPayment(body) {
+  const r = body.recipient || {}
+  const p = body.payer || {}
+  return {
+    payerAccount: p.account || body.payerAccount,
+    receiverName: r.name,
+    receiverINN: r.inn || body.recipientInn || '',
+    receiverKPP: r.kpp || body.recipientKpp || '',
+    receiverAccount: (r.account || '').replace(/\s/g, ''),
+    receiverBic: (r.bic || '').replace(/\D/g, ''),
+    amount: Number(body.amount).toFixed(2),
+    purpose: body.purpose || '',
+    vat: body.vat || 'VatZero',
+    priority: body.priority === 'urgent' ? '1' : '5',
+  }
+}
+
 app.post('/api/payments', async (req, res) => {
   const body = req.body || {}
   try {
-    const result = await submitPayment(USERNAME, PASSWORD, body)
-    res.json({ success: true, data: result })
+    // sign=false → save as DRAFT (no money). Real send only when body.sign === true.
+    const result = await webpay.submitPayment(USERNAME, PASSWORD, mapPayment(body), { sign: !!body.sign })
+    res.json({ success: !!result.ok, data: result })
   } catch (err) {
     console.error('[payments POST]', err.message)
     // Fall back to draft so UI doesn't break
@@ -100,6 +194,49 @@ app.get('/api/contractors', async (req, res) => {
   } catch (err) {
     console.error('[contractors]', err.message)
     res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+app.get('/api/tariffs', async (req, res) => {
+  try {
+    const data = await getTariffs(USERNAME, PASSWORD)
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[tariffs]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+
+app.post('/api/transfer-own', async (req, res) => {
+  const { fromAccount, toAccount, amount, purpose, sign } = req.body || {}
+  if (!fromAccount || !toAccount || !amount) return res.status(400).json({ success:false, error:'fromAccount, toAccount, amount обязательны' })
+  try {
+    const data = await transferOwn(USERNAME, PASSWORD, { fromAccount, toAccount, amount, purpose, sign: !!sign })
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[transfer-own]', err.message)
+    res.status(500).json({ success:false, error: err.message })
+  }
+})
+
+// Список разделов ДБО, которые умеет отдавать прокси
+app.get('/api/sections', (_, res) => {
+  res.json({
+    success: true,
+    data: Object.entries(DBO_SECTIONS).map(([key, s]) => ({ key, title: s.title })),
+  })
+})
+
+// Данные конкретного раздела ДБО (кредиты, депозиты, эквайринг, АУСН и т.д.)
+app.get('/api/sections/:key', async (req, res) => {
+  try {
+    const data = await getSectionData(USERNAME, PASSWORD, req.params.key)
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[section]', req.params.key, err.message)
+    res.status(err.message.startsWith('Неизвестный раздел') ? 404 : 500)
+      .json({ success: false, error: err.message })
   }
 })
 
