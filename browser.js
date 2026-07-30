@@ -1781,6 +1781,36 @@ async function reconDocuments(username, password) {
   }
   for (const t of traffic) { try { walk(JSON.parse(t.body)) } catch {} }
 
+  // Скелет структуры форм с платежами: только имена полей и типы, без значений.
+  // Нужен, чтобы понять, где лежит идентификатор документа и какие действия
+  // доступны у конкретной строки — по этому строится подпись и удаление.
+  const skeleton = (node, depth = 0) => {
+    if (depth > 4) return '…'
+    if (node === null) return 'null'
+    if (Array.isArray(node)) {
+      return node.length ? [`массив(${node.length})`, skeleton(node[0], depth + 1)] : 'массив(0)'
+    }
+    if (typeof node !== 'object') return typeof node
+    const out = {}
+    for (const k of Object.keys(node).slice(0, 40)) out[k] = skeleton(node[k], depth + 1)
+    return out
+  }
+
+  const structures = {}
+  for (const t of traffic) {
+    let parsed
+    try { parsed = JSON.parse(t.body) } catch { continue }
+    for (const cmd of (parsed.commands || [])) {
+      const name = cmd.instanceName || ''
+      if (!/payments|mainForm/i.test(name)) continue
+      if (structures[name]) continue
+      structures[name] = {
+        actions: Object.keys(cmd.actions || {}),
+        fields: skeleton(cmd.fields, 1),
+      }
+    }
+  }
+
   return {
     visitedSections: visited,
     responses: traffic.length,
@@ -1790,6 +1820,7 @@ async function reconDocuments(username, password) {
     // Здесь ищем что-то вроде _sign, _delete, _remove — это и есть ключ к подписи
     actions: [...actions].sort(),
     instances: [...instances].sort().slice(0, 150),
+    structures,
   }
 }
 
