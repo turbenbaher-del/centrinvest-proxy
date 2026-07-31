@@ -10,6 +10,8 @@ let cachedApiResponses = []      // all JSON API responses from last full naviga
 const BASE = 'https://dbo.centrinvest.ru/sbns-web'
 const LOGIN_URL = `${BASE}/ru/html/login.html`
 const MAIN_URL = `${BASE}/main.zul`
+// Новый интерфейс: заходим сюда, чтобы после логина вернуться именно в него
+const API_UI_URL = 'https://dbo.centrinvest.ru/api-ui/'
 
 async function getBrowser() {
   if (!browser || !browser.isConnected()) {
@@ -60,8 +62,11 @@ async function ensureLoggedIn(username, password) {
     if (t) sessionAuthToken = t
   })
 
-  // Сервер держит соединение открытым (стримит) → ждём только commit, а форму — по селектору.
-  await page.goto(LOGIN_URL, { waitUntil: 'commit', timeout: 30000 })
+  // Заходим СРАЗУ на новый интерфейс. Он редиректит на страницу логина, но с
+  // «возвратом» в api-ui — после входа банк вернёт нас в новый интерфейс.
+  // Если же логиниться через классическую страницу напрямую, банк возвращает
+  // в старый main.zul, откуда переход в api-ui сбрасывает сессию.
+  await page.goto(API_UI_URL, { waitUntil: 'commit', timeout: 30000 })
   await page.waitForSelector('#userName', { timeout: 30000, state: 'attached' })
   // '#btn' раскрывает форму «вход по логину/паролю» (поля скрыты до клика)
   try { await page.click('#btn', { timeout: 3000 }) } catch {}
@@ -73,11 +78,11 @@ async function ensureLoggedIn(username, password) {
     await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 30000, waitUntil: 'commit' })
   } catch (e) {
     // Банк не пустил в отведённое время — обычно это временное ограничение
-    // частоты входов с хостинга. Отдаём человекопонятную причину вместо
-    // сырого «page.waitForURL: Timeout …», который лез прямо в интерфейс.
+    // частоты входов. Отдаём человекопонятную причину вместо сырого таймаута.
     await browserSafeClose()
     throw new Error('Банк не отвечает на вход — вероятно, временное ограничение. Повторите через 1–2 минуты.')
   }
+
   await waitForAppReady(page)
 
   console.log('[browser] Logged in, URL:', page.url())
@@ -2128,6 +2133,96 @@ function fieldVal(f) {
 }
 
 /**
+ * Перевод между своими счетами через СТРУКТУРНЫЙ API (форма r030accounts).
+ * Счета выбираются по идентификатору из списка формы, а не кликом — надёжно.
+ * sign=false → черновик (_save, денег не двигает); sign=true → подпись+отправка
+ * (_saveAndSign, дальше банк запросит ключ токена и PayControl).
+ */
+async function transferOwnStructured(username, password, { fromAccount, toAccount, amount, purpose = '', sign = false }) {
+  const p = await ensureLoggedIn(username, password)
+  const ready = await waitForAppReady(p, 45000)
+  if (!ready) throw new Error('Интерфейс ДБО не загрузился')
+
+  const norm = x => String(x || '').replace(/\D/g, '')
+  const fromN = norm(fromAccount), toN = norm(toAccount)
+
+  // Сбрасываем состояние: прошлый незавершённый перевод мог оставить форму
+  // открытой, и тогда повторный menu/click не отдаёт чистую форму. Перезаходим
+  // в новый интерфейс — это закрывает все открытые формы и диалоги.
+  try {
+    await p.goto('https://dbo.centrinvest.ru/api-ui/', { waitUntil: 'commit', timeout: 30000 })
+    await waitForAppReady(p, 30000)
+  } catch {}
+
+  // 1) Открываем форму перевода между своими счетами
+  const r = await bankApi(p, 'POST', '/api/v1/menu/click', { menuItem: 'corporate-api-menu-small-r030accounts' })
+  const form = (r.json?.commands || []).find(c => /r030accounts/.test(c.instanceName || ''))
+  if (!form?.instanceToken) throw new Error('форма перевода не открылась')
+
+  // Сопоставляем счета с id. Список получателей зависит от выбранного плательщика,
+  // поэтому нужный счёт может не оказаться в receiverAccountId.items. Но у счёта
+  // ОДИН и тот же id в обоих списках — ищем по обоим (плательщики содержат все счета).
+  const allItems = [
+    ...(form.fields?.payerAccountId?.items || []),
+    ...(form.fields?.receiverAccountId?.items || []),
+  ]
+  const matchItem = (accN) =>
+    allItems.find(i => norm(i.accountNumber || i.account) === accN)
+    || allItems.find(i => JSON.stringify(i).includes(accN))
+  const payer = matchItem(fromN)
+  const receiver = matchItem(toN)
+  if (!payer) throw new Error('счёт списания не найден в форме: ' + fromAccount)
+  if (!receiver) throw new Error('счёт зачисления не найден в форме: ' + toAccount)
+
+  // 2) Заполняем поля и сохраняем/подписываем
+  const action = sign ? '_saveAndSign' : '_save'
+  const fields = {
+    payerAccountId: { value: payer.id },
+    receiverAccountId: { value: receiver.id },
+    documentSum: { value: Number(amount).toFixed(2) },
+    paymentPurpose: { value: purpose },
+  }
+  let resp = await bankApi(p, 'PUT', '/api/v1/ui/rur/payment/r030accounts/doAction', {
+    actionId: action, fields, instanceToken: form.instanceToken,
+  })
+  console.log('[transfer2] после', action, '→', (resp.json?.commands || []).map(c => c.instanceName).join(', '))
+
+  // 3) Разбираем диалоги/ошибки до успеха
+  for (let step = 0; step < 8; step++) {
+    const cmds = resp.json?.commands || []
+
+    // Жёсткие ошибки полей
+    const hard = cmds.flatMap(c => Object.entries(c.fields || {}))
+      .flatMap(([id, f]) => (f.errors || []).map(e => id + ': ' + (e.message || e)))
+    if (hard.length) return { ok: false, error: hard.join('; ') }
+
+    // Диалог предупреждений (WARN) — продолжаем нашим действием
+    const es = cmds.find(c => /errorsSave/.test(c.instanceName || ''))
+    if (es?.instanceToken) {
+      resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
+        { actionId: action, fields: {}, instanceToken: es.instanceToken })
+      continue
+    }
+
+    // Подтверждение создания/подписи — успех
+    const ok = cmds.find(c => /confirmDialog|cryptoProfileSelect|eTokenPassSign/.test(c.instanceName || ''))
+    if (ok) {
+      // Для черновика успех — это закрытие формы; для подписи — начало флоу ключа
+      return { ok: true, sign, needsSign: sign, nextForm: ok.instanceName }
+    }
+
+    // Форма закрылась без ошибок — черновик сохранён
+    const closed = cmds.some(c => c.command === 'formClose' && /r030accounts/.test(c.instanceName || ''))
+    if (closed) return { ok: true, sign, saved: true }
+
+    break
+  }
+
+  // Не поняли ответ — отдаём, что пришло, честно
+  return { ok: false, error: 'неожиданный ответ банка', commands: (resp.json?.commands || []).map(c => c.instanceName).filter(Boolean) }
+}
+
+/**
  * Разведка формы перевода между своими счетами (r030accounts).
  * Только открывает форму и возвращает её поля — чтобы реализовать перевод
  * по структурному API с верными именами полей, а не кликами. Ничего не сохраняет.
@@ -2433,4 +2528,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, reconTransferForm, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, reconTransferForm, transferOwnStructured, closeBrowser }

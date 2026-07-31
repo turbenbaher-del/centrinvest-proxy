@@ -1,6 +1,22 @@
+// Локальный запуск: подхватываем .env без внешних зависимостей.
+// На Railway переменные берутся из окружения, файла .env там нет — это не мешает.
+try {
+  const fs = require('fs'); const path = require('path')
+  const envPath = path.join(__dirname, '.env')
+  if (fs.existsSync(envPath)) {
+    for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/)
+      if (m && !line.trim().startsWith('#') && process.env[m[1]] === undefined) {
+        process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
+      }
+    }
+    console.log('[env] .env подхвачен')
+  }
+} catch {}
+
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, reconTransferForm, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, reconTransferForm, transferOwnStructured, closeBrowser } = require('./browser')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -252,9 +268,9 @@ app.post('/api/transfer-own', async (req, res) => {
   const { fromAccount, toAccount, amount, purpose, sign } = req.body || {}
   if (!fromAccount || !toAccount || !amount) return res.status(400).json({ success:false, error:'fromAccount, toAccount, amount обязательны' })
   try {
-    const data = await transferOwn(USERNAME, PASSWORD, { fromAccount, toAccount, amount, purpose, sign: !!sign })
-    // success отражает реальный итог, а не сам факт ответа: transferOwn теперь
-    // сообщает ok=false, если банк не принял (счёт не выбран, ошибки проверки)
+    // Структурный API вместо кликов по форме: счета выбираются по идентификатору,
+    // поэтому не бывает «счёт получателя не выбран». success = реальный итог банка.
+    const data = await transferOwnStructured(USERNAME, PASSWORD, { fromAccount, toAccount, amount, purpose, sign: !!sign })
     res.json({ success: data.ok !== false, error: data.error || undefined, data })
   } catch (err) {
     console.error('[transfer-own]', err.message)
