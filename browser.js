@@ -69,12 +69,28 @@ async function ensureLoggedIn(username, password) {
   await page.fill('#password', password, { timeout: 15000 })
   await page.click('#submitButton')
 
-  await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 30000, waitUntil: 'commit' })
+  try {
+    await page.waitForURL(url => !url.toString().includes('login.html'), { timeout: 30000, waitUntil: 'commit' })
+  } catch (e) {
+    // Банк не пустил в отведённое время — обычно это временное ограничение
+    // частоты входов с хостинга. Отдаём человекопонятную причину вместо
+    // сырого «page.waitForURL: Timeout …», который лез прямо в интерфейс.
+    await browserSafeClose()
+    throw new Error('Банк не отвечает на вход — вероятно, временное ограничение. Повторите через 1–2 минуты.')
+  }
   await waitForAppReady(page)
 
   console.log('[browser] Logged in, URL:', page.url())
   sessionExpiry = Date.now() + 20 * 60 * 1000
   return page
+}
+
+// Тихо закрыть зависшую сессию, чтобы следующий вход начинался с чистого листа
+async function browserSafeClose() {
+  try { if (page) await page.context().close() } catch {}
+  page = null
+  sessionExpiry = 0
+  sessionAuthToken = null
 }
 
 /**
