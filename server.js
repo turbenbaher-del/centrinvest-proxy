@@ -1,6 +1,6 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, closeBrowser } = require('./browser')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -98,7 +98,9 @@ app.get('/api/accounts', async (req, res) => {
     // отдаёт в форме платежа, а не на странице счетов. Если не получилось —
     // отдаём то, что есть: список счетов важнее подписей.
     try {
-      const extra = await webpay.getPayerAccounts(USERNAME, PASSWORD)
+      // Через уже открытую сессию: отдельный вход ради этого удваивал
+      // число заходов в банк на каждый запрос счетов
+      const extra = await getAccountNames(USERNAME, PASSWORD)
       const byNumber = new Map(extra.map(a => [a.number, a]))
       for (const acc of data) {
         const e = byNumber.get(String(acc.number).replace(/\D/g, ''))

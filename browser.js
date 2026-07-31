@@ -3,6 +3,7 @@ const { chromium } = require('playwright-chromium')
 let browser = null
 let page = null
 let sessionExpiry = 0
+let sessionAuthToken = null      // токен API банка из текущей сессии
 let cachedAccounts = []          // last successful accounts fetch
 let cachedApiResponses = []      // all JSON API responses from last full navigation
 
@@ -49,6 +50,15 @@ async function ensureLoggedIn(username, password) {
     viewport: { width: 1280, height: 900 },
   })
   page = await ctx.newPage()
+
+  // Токен сессии банка ловим прямо при входе: с ним можно обращаться к API
+  // банка из уже открытой страницы, не логинясь второй раз. Отдельный вход
+  // ради формы платежа удваивал нагрузку на банк.
+  sessionAuthToken = null
+  page.on('request', (r) => {
+    const t = r.headers()['authtoken']
+    if (t) sessionAuthToken = t
+  })
 
   // Сервер держит соединение открытым (стримит) → ждём только commit, а форму — по селектору.
   await page.goto(LOGIN_URL, { waitUntil: 'commit', timeout: 30000 })
@@ -1747,6 +1757,49 @@ async function getSectionData(username, password, key) {
   return sectionCache[key] || result
 }
 
+/** Запрос к API банка из уже открытой сессии — без повторного входа. */
+async function bankApi(p, method, path, body) {
+  if (!sessionAuthToken) throw new Error('токен сессии банка не пойман')
+  return p.evaluate(async ([m, u, b, t]) => {
+    const res = await fetch('https://dbo.centrinvest.ru' + u, {
+      method: m,
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', authToken: t, Accept: 'application/json, text/plain, */*' },
+      body: b ? JSON.stringify(b) : undefined,
+    })
+    return { status: res.status, json: await res.json().catch(() => null) }
+  }, [method, path, body, sessionAuthToken])
+}
+
+/**
+ * Названия счетов («ГО», «корп.карта») и остатки по каждому счёту.
+ *
+ * Страница счетов в новом интерфейсе отдаёт только номера. Форма платежа
+ * отдаёт список счетов структурно — берём оттуда, переиспользуя открытую
+ * сессию, чтобы не входить в банк второй раз.
+ * Только чтение: форма открывается, ничего не сохраняется.
+ */
+async function getAccountNames(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  const r = await bankApi(p, 'POST', '/api/v1/menu/click', { menuItem: 'corporate-api-menu-small-r030contragent' })
+  const cmd = (r.json?.commands || []).find(c => (c.instanceName || '').endsWith('/r030contragent'))
+  const items = cmd?.fields?.payerAccountId?.items || []
+  if (items.length === 0) return []
+
+  console.log('[accountNames] поля счёта:', Object.keys(items[0]).join(', '))
+  const digits = (x) => String(x ?? '').replace(/\D/g, '')
+  const money = (x) => {
+    const n = parseFloat(String(x ?? '').replace(/\s/g, '').replace(',', '.'))
+    return Number.isFinite(n) ? n : null
+  }
+  return items.map(i => ({
+    number: digits(i.accountNumber || i.number || i.account),
+    name: String(i.accountName || i.name || i.alias || '').trim(),
+    balance: money(i.balance ?? i.rest ?? i.sum ?? i.availableBalance),
+    currency: String(i.currency || i.currencyCode || '').trim().toUpperCase() || '',
+  })).filter(a => a.number.length === 20)
+}
+
 /**
  * Документы из структурного интерфейса ДБО.
  *
@@ -2005,4 +2058,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, closeBrowser }
