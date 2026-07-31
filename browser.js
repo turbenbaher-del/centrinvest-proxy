@@ -1992,6 +1992,89 @@ async function getDocuments(username, password) {
 }
 
 /**
+ * Действие над документом ДБО: подпись, удаление, отправка, снятие подписи.
+ *
+ * Протокол (пойман в _apiflow.json): форма списка приходит по menu/click с
+ * instanceToken и actions; выбор строки и действие идут одним запросом —
+ * PUT .../{форма}/doAction { actionId, fields: { payments: { value: id } }, instanceToken }.
+ *
+ * ПРЕДОХРАНИТЕЛИ:
+ *  - _sign/_saveAndSign/_send двигают реальные деньги — вызываются только с confirm:true;
+ *  - действие применяется строго к документу с переданным id и проверяется, что он
+ *    в форме есть, иначе отказ (не подписать «что подвернулось»);
+ *  - разрешено действие, только если банк указал его в actions этого документа/формы.
+ */
+const DOC_FORMS = {
+  draft:        'ui/payments/draft',
+  partlySigned: 'ui/payments/partlySigned',
+  inProcess:    'ui/payments/inProcess',
+}
+// Действия, реально двигающие деньги: требуют явного подтверждения владельца
+const MONEY_ACTIONS = new Set(['_sign', '_saveAndSign', '_send'])
+
+async function documentAction(username, password, { id, action, confirm = false }) {
+  if (!id) throw new Error('не передан id документа')
+  if (!action) throw new Error('не передано действие')
+  if (MONEY_ACTIONS.has(action) && !confirm) {
+    throw new Error(`Действие ${action} двигает деньги и требует подтверждения (confirm:true)`)
+  }
+
+  const p = await ensureLoggedIn(username, password)
+  const ready = await waitForAppReady(p, 45000)
+  if (!ready) throw new Error('Интерфейс ДБО не загрузился')
+
+  // 1) Находим форму, где лежит документ, и её actions/instanceToken
+  const forms = ['draft', 'partlySigned', 'inProcess']
+  let target = null
+  for (const key of forms) {
+    const menuItem = 'corporate-api-menu-small-r020statement'  // раздел платежей
+    const r = await bankApi(p, 'POST', '/api/v1/menu/click', { menuItem })
+    const cmd = (r.json?.commands || []).find(c => c.instanceName === DOC_FORMS[key])
+    if (!cmd?.instanceToken) continue
+    const items = cmd.fields?.payments?.items || []
+    const doc = items.find(it => {
+      const v = (it.id && typeof it.id === 'object' && 'value' in it.id) ? it.id.value : it.id
+      return String(v) === String(id)
+    })
+    if (doc) {
+      target = { key, form: DOC_FORMS[key], token: cmd.instanceToken, actions: Object.keys(cmd.actions || {}) }
+      break
+    }
+  }
+  if (!target) throw new Error('документ не найден среди черновиков/на подпись/в обработке — возможно, уже проведён')
+
+  // 2) Проверяем, что банк вообще разрешает это действие в этой форме
+  if (!target.actions.includes(action)) {
+    throw new Error(`банк не разрешает ${action} для этого документа (доступно: ${target.actions.join(', ') || 'ничего'})`)
+  }
+
+  // 3) Выбор строки + действие одним запросом
+  const formSeg = target.form.replace(/^ui\//, '')  // ui/payments/draft → payments/draft
+  const res = await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/doAction`, {
+    actionId: action,
+    fields: { payments: { value: String(id) } },
+    instanceToken: target.token,
+  })
+
+  // 4) Разбираем ответ: успех, диалог подтверждения или ошибка
+  const cmds = res.json?.commands || []
+  const errors = cmds.flatMap(c => Object.entries(c.fields || {}))
+    .flatMap(([fid, f]) => (f.errors || []).map(e => `${fid}: ${e.message || e}`))
+  const dialog = cmds.find(c => /confirmDialog|sign|otp|sms|certificate|payControl/i.test(c.instanceName || ''))
+
+  return {
+    ok: errors.length === 0,
+    action,
+    form: target.key,
+    errors,
+    // Если банк ждёт подтверждение подписи (PayControl/SMS) — это отдельный шаг,
+    // его владелец делает в своём ДБО
+    needsBankConfirm: !!dialog,
+    commands: cmds.map(c => c.instanceName).filter(Boolean),
+  }
+}
+
+/**
  * Разведка документного API: ищем, каким запросом банк отдаёт список документов
  * с идентификаторами и какие действия над ними доступны (подпись, удаление).
  * Сейчас платежи снимаются парсингом текста выписки, где id нет вовсе, —
@@ -2115,4 +2198,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, closeBrowser }

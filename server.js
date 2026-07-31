@@ -1,6 +1,6 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, closeBrowser } = require('./browser')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -260,6 +260,24 @@ app.get('/api/documents', async (_, res) => {
   } catch (err) {
     console.error('[documents]', err.message)
     res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Действие над документом: подпись, удаление, отправка.
+// _sign/_send двигают реальные деньги — прокси требует confirm:true, и это
+// осознанное решение вызывающей стороны, а не значение по умолчанию.
+app.post('/api/documents/:id/action', async (req, res) => {
+  const { action, confirm } = req.body || {}
+  const allowed = ['_sign', '_send', '_removeSign', '_delete_payments', '_edit']
+  if (!allowed.includes(action)) {
+    return res.status(400).json({ success: false, error: 'Недопустимое действие: ' + action })
+  }
+  try {
+    const data = await documentAction(USERNAME, PASSWORD, { id: req.params.id, action, confirm: !!confirm })
+    res.json({ success: data.ok, data })
+  } catch (err) {
+    console.error('[document action]', action, err.message)
+    res.status(400).json({ success: false, error: err.message })
   }
 })
 
