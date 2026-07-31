@@ -1983,7 +1983,7 @@ async function reconDocuments(username, password) {
     try { parsed = JSON.parse(t.body) } catch { continue }
     for (const cmd of (parsed.commands || [])) {
       const name = cmd.instanceName || ''
-      if (!/payments|mainForm/i.test(name)) continue
+      if (!/payments|mainForm|account/i.test(name)) continue
       if (structures[name]) continue
       structures[name] = {
         actions: Object.keys(cmd.actions || {}),
