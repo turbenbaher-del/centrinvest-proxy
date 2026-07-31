@@ -262,14 +262,20 @@ async function getAccountsViaResponseListener(p) {
     })
   }
 
-  allNums.forEach(addAccount)
-  // Счета, которые есть только в ответах банка, но не попали в текст страницы
-  for (const num of fromApi.keys()) addAccount(num, -1)
-  for (const { body } of apiData) {
-    try {
-      const nums = (body.match(/\b\d{20}\b/g) || []).filter(n => accountPrefix.test(n))
-      nums.forEach(n => addAccount(n, -1))
-    } catch {}
+  // Источник истины — список счетов, который банк отдал явно. Текст страницы
+  // для этого не годится: в назначениях платежей встречаются чужие счета
+  // («перевод на ЛС 40817…»), и они попадали в список как свои.
+  if (fromApi.size > 0) {
+    for (const num of fromApi.keys()) addAccount(num)
+  } else {
+    // Явного списка нет — тогда только номера со страницы, лучше чем ничего
+    allNums.forEach(addAccount)
+    for (const { body } of apiData) {
+      try {
+        const nums = (body.match(/\b\d{20}\b/g) || []).filter(n => accountPrefix.test(n))
+        nums.forEach(addAccount)
+      } catch {}
+    }
   }
 
   // Аресты по счетам. Банк пишет это на странице красным: «АРЕСТОВАНО —

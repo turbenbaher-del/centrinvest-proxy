@@ -94,30 +94,35 @@ app.get('/api/accounts', async (req, res) => {
   try {
     const data = await getAccountsData(USERNAME, PASSWORD)
 
-    // Названия счетов («ГО», «корп.карта») и остатки по каждому счёту банк
-    // отдаёт в форме платежа, а не на странице счетов. Если не получилось —
-    // отдаём то, что есть: список счетов важнее подписей.
+    // Список счетов, названия и остатки банк отдаёт в форме платежа, а не на
+    // странице счетов. Он и есть источник истины: разбор текста страницы
+    // подхватывал чужие счета из назначений платежей («перевод на ЛС 40817…»)
+    // и показывал их как свои — счетов выходило пять вместо трёх.
+    let result = data
     try {
       // Через уже открытую сессию: отдельный вход ради этого удваивал
       // число заходов в банк на каждый запрос счетов
-      const extra = await getAccountNames(USERNAME, PASSWORD)
-      const byNumber = new Map(extra.map(a => [a.number, a]))
-      for (const acc of data) {
-        const e = byNumber.get(String(acc.number).replace(/\D/g, ''))
-        if (!e) continue
-        if (e.name) acc.name = e.name
-        if (e.currency && e.currency !== 'RUR') acc.currency = e.currency
-        if (e.balance !== null && e.balance !== undefined) {
-          acc.balance = e.balance
-          acc.balanceSource = 'form'
-        }
+      const own = await getAccountNames(USERNAME, PASSWORD)
+      if (own.length > 0) {
+        // Предупреждение об арестах есть только на странице — переносим
+        const seizure = data.find(a => a.seizureNotice)
+        result = own.map(a => ({
+          number: a.number,
+          name: a.name,
+          currency: a.currency || 'RUR',
+          balance: a.balance ?? 0,
+          balanceSource: a.balance === null || a.balance === undefined ? 'unknown' : 'form',
+          status: 'Открыт',
+          seizureNotice: seizure?.seizureNotice,
+          seizureAccounts: seizure?.seizureAccounts,
+        }))
       }
-      console.log('[accounts] названий подмешано:', data.filter(a => a.name).length)
+      console.log('[accounts] счетов от банка:', own.length, '| со страницы было:', data.length)
     } catch (e) {
-      console.warn('[accounts] названия счетов недоступны:', e.message)
+      console.warn('[accounts] список счетов из формы недоступен:', e.message)
     }
 
-    res.json({ success: true, data })
+    res.json({ success: true, data: result })
   } catch (err) {
     console.error('[accounts]', err.message)
     res.status(500).json({ success: false, error: err.message })
