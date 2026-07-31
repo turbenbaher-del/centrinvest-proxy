@@ -1760,6 +1760,33 @@ async function getSectionData(username, password, key) {
   }
   for (const b of bodies) { try { walk(JSON.parse(b)) } catch {} }
 
+  // Содержимое раздела лежит в таблицах, а не в парах «подпись — значение»:
+  // без этого кредиты и депозиты возвращали только фильтры вроде «Статус = all».
+  const rows = []
+  const collectRows = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(collectRows); return }
+
+    if (Array.isArray(node.items) && node.items.length > 0 && rows.length < 60) {
+      for (const it of node.items) {
+        if (!it || typeof it !== 'object' || Array.isArray(it)) continue
+        // Оставляем только простые значения: вложенные структуры не нужны
+        const row = {}
+        for (const [k, v] of Object.entries(it)) {
+          const val = (v && typeof v === 'object' && !Array.isArray(v) && 'value' in v) ? v.value : v
+          if (val === null || val === undefined) continue
+          if (typeof val === 'object') continue
+          if (String(val).trim() === '') continue
+          row[k] = val
+        }
+        // Строки-пустышки и служебные флаги пропускаем
+        if (Object.keys(row).length >= 2 && rows.length < 60) rows.push(row)
+      }
+    }
+    Object.values(node).forEach(collectRows)
+  }
+  for (const b of bodies) { try { collectRows(JSON.parse(b)) } catch {} }
+
   // Текст экрана — чтобы показать раздел, даже если структурных полей банк не дал
   const screenText = await p.evaluate(() => (document.body.innerText || '').slice(0, 4000)).catch(() => '')
 
@@ -1768,13 +1795,14 @@ async function getSectionData(username, password, key) {
     title: section.title,
     navigated,
     fields,
+    rows,
     screenText,
     responses: bodies.length,
   }
 
   // Кэшируем последний непустой результат: разделы меняются редко,
   // а навигация по DOM банка иногда не срабатывает с первого раза
-  if (fields.length > 0 || screenText.length > 200) sectionCache[key] = result
+  if (fields.length > 0 || rows.length > 0 || screenText.length > 200) sectionCache[key] = result
   return sectionCache[key] || result
 }
 
