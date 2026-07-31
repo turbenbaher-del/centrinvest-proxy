@@ -195,26 +195,73 @@ async function getAccountsViaResponseListener(p) {
   const allNums = [...new Set((pageBodyText.match(/\b\d{20}\b/g) || []).filter(n => accountPrefix.test(n)))]
   console.log('[browser] Account numbers in DOM:', allNums)
 
+  // Настоящие остатки и валюты берём из ответов банка: в шапке страницы есть
+  // сумма только по текущему счёту, и раньше она приписывалась первому счёту,
+  // а всем остальным ставился ноль — на экране четыре счёта из пяти были «0,00».
+  const fromApi = new Map()
+  const numberKeys  = /^(accountNumber|account|number|acc|nomer)$/i
+  const balanceKeys = /^(balance|rest|remain|ostatok|currentBalance|availableBalance|saldo|sum)$/i
+  const currencyKeys = /^(currency|currencyCode|curr|iso)$/i
+
+  const scanForAccounts = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(scanForAccounts); return }
+
+    let num = '', bal = null, cur = ''
+    for (const [k, v] of Object.entries(node)) {
+      const val = (v && typeof v === 'object' && !Array.isArray(v) && 'value' in v) ? v.value : v
+      if (numberKeys.test(k)) {
+        const digits = String(val ?? '').replace(/\D/g, '')
+        if (/^\d{20}$/.test(digits) && accountPrefix.test(digits)) num = digits
+      } else if (balanceKeys.test(k)) {
+        const n = parseFloat(String(val ?? '').replace(/\s/g, '').replace(',', '.'))
+        if (Number.isFinite(n)) bal = n
+      } else if (currencyKeys.test(k)) {
+        const s = String(val ?? '').trim().toUpperCase()
+        if (/^[A-Z]{3}$/.test(s)) cur = s
+      }
+    }
+    if (num && bal !== null && !fromApi.has(num)) {
+      fromApi.set(num, { balance: bal, currency: cur })
+    }
+
+    Object.values(node).forEach(scanForAccounts)
+  }
+
+  for (const { body } of apiData) {
+    try { scanForAccounts(JSON.parse(body)) } catch {}
+  }
+  console.log('[browser] Остатки из ответов банка:', fromApi.size)
+
   const accounts = []
   const seen = new Set()
-  allNums.forEach((num, idx) => {
+  const addAccount = (num, idx) => {
     if (seen.has(num)) return
     seen.add(num)
-    accounts.push({ number: num, currency: 'RUR', balance: idx === 0 ? currentBalance : 0, status: 'Открыт' })
-  })
+    const api = fromApi.get(num)
+    accounts.push({
+      number: num,
+      currency: api?.currency || 'RUR',
+      // Сумма из шапки относится к открытому счёту — используем её только
+      // как запасной вариант для первого и только если банк не дал остаток
+      balance: api ? api.balance : (idx === 0 ? currentBalance : 0),
+      status: 'Открыт',
+      // Видно, откуда взялась сумма: из данных банка или из шапки страницы
+      balanceSource: api ? 'api' : (idx === 0 ? 'header' : 'unknown'),
+    })
+  }
 
-  // Supplement with any account numbers from API responses
+  allNums.forEach(addAccount)
+  // Счета, которые есть только в ответах банка, но не попали в текст страницы
+  for (const num of fromApi.keys()) addAccount(num, -1)
   for (const { body } of apiData) {
     try {
       const nums = (body.match(/\b\d{20}\b/g) || []).filter(n => accountPrefix.test(n))
-      nums.forEach(n => {
-        if (seen.has(n)) return
-        seen.add(n)
-        accounts.push({ number: n, currency: 'RUR', balance: 0, status: 'Открыт' })
-      })
+      nums.forEach(n => addAccount(n, -1))
     } catch {}
   }
-  console.log('[browser] Parsed accounts:', accounts.map(a => `${a.number}=${a.balance}`))
+
+  console.log('[browser] Parsed accounts:', accounts.map(a => `${a.number}=${a.balance}(${a.balanceSource})`))
 
   console.log('[browser] Found accounts:', accounts.length, accounts.map(a => a.number))
   if (accounts.length > 0) cachedAccounts = accounts
