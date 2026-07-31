@@ -1779,8 +1779,15 @@ async function getSectionData(username, password, key) {
           if (String(val).trim() === '') continue
           row[k] = val
         }
-        // Строки-пустышки и служебные флаги пропускаем
-        if (Object.keys(row).length >= 2 && rows.length < 60) rows.push(row)
+        // Пункты меню приходят такими же массивами items, как и данные.
+        // Отличаем по набору полей: у навигации кроме id/label/parentId
+        // ничего нет — показывать её как содержимое раздела нельзя.
+        const keys = Object.keys(row)
+        const MENU_KEYS = new Set(['id', 'label', 'visible', 'parentId', 'icon', 'selected', 'expanded'])
+        const isMenuEntry = keys.every(k => MENU_KEYS.has(k))
+        if (isMenuEntry) continue
+
+        if (keys.length >= 2 && rows.length < 60) rows.push(row)
       }
     }
     Object.values(node).forEach(collectRows)
