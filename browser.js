@@ -245,19 +245,20 @@ async function getAccountsViaResponseListener(p) {
 
   const accounts = []
   const seen = new Set()
-  const addAccount = (num, idx) => {
+  const addAccount = (num) => {
     if (seen.has(num)) return
     seen.add(num)
     const api = fromApi.get(num)
     accounts.push({
       number: num,
       currency: api?.currency || 'RUR',
-      // Сумма из шапки относится к открытому счёту — используем её только
-      // как запасной вариант для первого и только если банк не дал остаток
-      balance: api ? api.balance : (idx === 0 ? currentBalance : 0),
+      // Сумма «СОБСТВЕННЫЕ СРЕДСТВА» в шапке — это ИТОГ по всем счетам,
+      // а не остаток одного из них. Раньше она приписывалась первому счёту
+      // и потом складывалась с остальными: итог выходил вдвое больше.
+      balance: api ? api.balance : 0,
       status: 'Открыт',
-      // Видно, откуда взялась сумма: из данных банка или из шапки страницы
-      balanceSource: api ? 'api' : (idx === 0 ? 'header' : 'unknown'),
+      // Видно, откуда взялась сумма и есть ли она вообще
+      balanceSource: api ? 'api' : 'unknown',
     })
   }
 
@@ -269,6 +270,20 @@ async function getAccountsViaResponseListener(p) {
       const nums = (body.match(/\b\d{20}\b/g) || []).filter(n => accountPrefix.test(n))
       nums.forEach(n => addAccount(n, -1))
     } catch {}
+  }
+
+  // Аресты по счетам. Банк пишет это на странице красным: «АРЕСТОВАНО —
+  // по 3 счетам в размере всех средств». Деньги на таких счетах недоступны,
+  // и не показать это в приложении опаснее, чем ошибиться в копейках.
+  const seizureMatch = pageBodyText.match(/АРЕСТОВАНО\s*\n?\s*([^\n]{3,200})/i)
+  const seizureNotice = seizureMatch ? seizureMatch[1].trim() : ''
+  const seizureCount = seizureNotice.match(/по\s+(\d+)\s+счет/i)
+  if (seizureNotice) {
+    console.log('[browser] Аресты:', seizureNotice)
+    accounts.forEach(a => {
+      a.seizureNotice = seizureNotice
+      a.seizureAccounts = seizureCount ? parseInt(seizureCount[1], 10) : null
+    })
   }
 
   console.log('[browser] Parsed accounts:', accounts.map(a => `${a.number}=${a.balance}(${a.balanceSource})`))
