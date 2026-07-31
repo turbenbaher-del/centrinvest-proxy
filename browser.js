@@ -1792,11 +1792,12 @@ async function getAccountNames(username, password) {
     const n = parseFloat(String(x ?? '').replace(/\s/g, '').replace(',', '.'))
     return Number.isFinite(n) ? n : null
   }
+  // Имена полей у банка: account, accountName, currentRest, isoCode
   return items.map(i => ({
-    number: digits(i.accountNumber || i.number || i.account),
-    name: String(i.accountName || i.name || i.alias || '').trim(),
-    balance: money(i.balance ?? i.rest ?? i.sum ?? i.availableBalance),
-    currency: String(i.currency || i.currencyCode || '').trim().toUpperCase() || '',
+    number: digits(i.account || i.accountNumber || i.number),
+    name: String(i.accountName || i.name || '').trim(),
+    balance: money(i.currentRest ?? i.balance ?? i.rest ?? i.availableBalance),
+    currency: String(i.isoCode || i.currency || i.currencyCode || '').trim().toUpperCase() || '',
   })).filter(a => a.number.length === 20)
 }
 
