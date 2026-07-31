@@ -2127,6 +2127,70 @@ function fieldVal(f) {
   return f
 }
 
+/**
+ * Разведка формы перевода между своими счетами (r030accounts).
+ * Только открывает форму и возвращает её поля — чтобы реализовать перевод
+ * по структурному API с верными именами полей, а не кликами. Ничего не сохраняет.
+ */
+async function reconTransferForm(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  const ready = await waitForAppReady(p, 45000)
+  if (!ready) throw new Error('Интерфейс ДБО не загрузился')
+
+  // Пробуем открыть форму перевода между своими счетами разными пунктами меню
+  const candidates = [
+    'corporate-api-menu-small-r030accounts',
+    'corporate-api-menu-small-r030base',
+    'corporate-api-menu-small-r030contragent',
+  ]
+  let form = null, via = null
+  for (const menuItem of candidates) {
+    const r = await bankApi(p, 'POST', '/api/v1/menu/click', { menuItem })
+    const cmds = r.json?.commands || []
+    // Прямо форма accounts?
+    form = cmds.find(c => /r030accounts/.test(c.instanceName || ''))
+    if (form) { via = menuItem; break }
+    // Либо базовая форма с переключателем — переключаемся на «Между своими счетами»
+    const base = cmds.find(c => /r030base/.test(c.instanceName || ''))
+    const sw = base?.fields?.r030FormSwitcher
+    if (base?.instanceToken && sw) {
+      const acc = (sw.items || []).find(i => /account|своими/i.test(i.id + ' ' + i.label))
+      if (acc) {
+        const r2 = await bankApi(p, 'PUT', '/api/v1/ui/rur/payment/r030base/doAction', {
+          actionId: '_switchForm_r030FormSwitcher',
+          fields: { r030FormSwitcher: { value: acc.id } },
+          instanceToken: base.instanceToken,
+        })
+        form = (r2.json?.commands || []).find(c => /r030accounts|accounts/.test(c.instanceName || ''))
+        if (form) { via = menuItem + ' → switch ' + acc.id; break }
+      }
+    }
+  }
+
+  if (!form) throw new Error('форма r030accounts не открылась ни одним способом')
+
+  // Скелет полей: имя → тип, у грид/select — состав элементов (без чувствительных значений)
+  const fields = {}
+  for (const [name, f] of Object.entries(form.fields || {})) {
+    const info = { type: f.type }
+    if (Array.isArray(f.items)) {
+      info.items = f.items.slice(0, 8).map(i => ({
+        id: String(i.id ?? '').slice(0, 40),
+        // подпись счёта / прозвище — по ней сопоставим номер
+        label: i.accountName || i.label || i.code || i.accountNumber || '',
+      }))
+    }
+    fields[name] = info
+  }
+
+  return {
+    via,
+    instanceName: form.instanceName,
+    actions: Object.keys(form.actions || {}),
+    fields,
+  }
+}
+
 /** Шаг 1: отправить документ на подпись и дойти до окна ввода ключа eToken. */
 async function signStart(username, password, { id }) {
   if (!id) throw new Error('не передан id документа')
@@ -2369,4 +2433,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, reconTransferForm, closeBrowser }

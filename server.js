@@ -1,6 +1,6 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, reconTransferForm, closeBrowser } = require('./browser')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -328,6 +328,17 @@ app.get('/api/recon/documents', async (_, res) => {
     res.json({ success: true, data })
   } catch (err) {
     console.error('[recon]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Разведка формы перевода между своими счетами — только чтение полей.
+app.get('/api/recon/transfer', async (_, res) => {
+  try {
+    const data = await reconTransferForm(USERNAME, PASSWORD)
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[recon transfer]', err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })
