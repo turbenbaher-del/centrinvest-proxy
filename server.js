@@ -253,7 +253,9 @@ app.post('/api/transfer-own', async (req, res) => {
   if (!fromAccount || !toAccount || !amount) return res.status(400).json({ success:false, error:'fromAccount, toAccount, amount обязательны' })
   try {
     const data = await transferOwn(USERNAME, PASSWORD, { fromAccount, toAccount, amount, purpose, sign: !!sign })
-    res.json({ success: true, data })
+    // success отражает реальный итог, а не сам факт ответа: transferOwn теперь
+    // сообщает ok=false, если банк не принял (счёт не выбран, ошибки проверки)
+    res.json({ success: data.ok !== false, error: data.error || undefined, data })
   } catch (err) {
     console.error('[transfer-own]', err.message)
     res.status(500).json({ success:false, error: err.message })

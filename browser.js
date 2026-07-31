@@ -1620,7 +1620,20 @@ async function transferOwn(username, password, { fromAccount, toAccount, amount,
 
   // 6) результат (текст экрана — статус/ошибка/запрос PayControl)
   const result = await p.evaluate(() => (document.body.innerText || '').replace(/\s+/g,' ').slice(0, 1200))
-  return { formState, actionClicked: clicked, signed: !!sign, screen: result }
+
+  // Честная оценка успеха. Форма-кликер иногда не выбирает счёт получателя
+  // (receiver пустой), и банк показывает «Результаты проверки / Не указан счёт» —
+  // раньше это уходило в приложение как успех. Теперь такое считаем провалом.
+  const receiverEmpty = !formState.receiver
+  const validationScreen = /результаты проверки|не указан счёт|не указан счет|не заполн|исправьте|обнаружены ошибки/i.test(result)
+  const ok = !!clicked && !receiverEmpty && !validationScreen
+
+  let error = ''
+  if (!clicked) error = 'Не удалось найти кнопку подтверждения в форме банка'
+  else if (receiverEmpty) error = 'Банк не принял счёт зачисления — перевод не отправлен'
+  else if (validationScreen) error = 'Банк вернул ошибки проверки — перевод не отправлен'
+
+  return { ok, error, formState, actionClicked: clicked, signed: !!sign, screen: result }
 }
 
 let cachedTariffs = []
