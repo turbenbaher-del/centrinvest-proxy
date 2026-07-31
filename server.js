@@ -93,6 +93,28 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/accounts', async (req, res) => {
   try {
     const data = await getAccountsData(USERNAME, PASSWORD)
+
+    // Названия счетов («ГО», «корп.карта») и остатки по каждому счёту банк
+    // отдаёт в форме платежа, а не на странице счетов. Если не получилось —
+    // отдаём то, что есть: список счетов важнее подписей.
+    try {
+      const extra = await webpay.getPayerAccounts(USERNAME, PASSWORD)
+      const byNumber = new Map(extra.map(a => [a.number, a]))
+      for (const acc of data) {
+        const e = byNumber.get(String(acc.number).replace(/\D/g, ''))
+        if (!e) continue
+        if (e.name) acc.name = e.name
+        if (e.currency && e.currency !== 'RUR') acc.currency = e.currency
+        if (e.balance !== null && e.balance !== undefined) {
+          acc.balance = e.balance
+          acc.balanceSource = 'form'
+        }
+      }
+      console.log('[accounts] названий подмешано:', data.filter(a => a.name).length)
+    } catch (e) {
+      console.warn('[accounts] названия счетов недоступны:', e.message)
+    }
+
     res.json({ success: true, data })
   } catch (err) {
     console.error('[accounts]', err.message)
