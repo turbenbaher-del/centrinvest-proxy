@@ -90,36 +90,47 @@ app.post('/api/login', async (req, res) => {
   }
 })
 
+// Последний удачный список СВОИХ счетов (из формы платежа) — источник истины.
+// Разбор текста страницы подхватывает чужие счета из назначений платежей
+// («перевод на ЛС 40817…») и получателей — на форме перевода это опасно.
+let cachedOwnAccounts = null
+
 app.get('/api/accounts', async (req, res) => {
   try {
     const data = await getAccountsData(USERNAME, PASSWORD)
+    const seizure = data.find(a => a.seizureNotice)
 
-    // Список счетов, названия и остатки банк отдаёт в форме платежа, а не на
-    // странице счетов. Он и есть источник истины: разбор текста страницы
-    // подхватывал чужие счета из назначений платежей («перевод на ЛС 40817…»)
-    // и показывал их как свои — счетов выходило пять вместо трёх.
-    let result = data
+    // Пытаемся получить достоверный список своих счетов из формы платежа
+    let own = []
     try {
-      // Через уже открытую сессию: отдельный вход ради этого удваивал
-      // число заходов в банк на каждый запрос счетов
-      const own = await getAccountNames(USERNAME, PASSWORD)
-      if (own.length > 0) {
-        // Предупреждение об арестах есть только на странице — переносим
-        const seizure = data.find(a => a.seizureNotice)
-        result = own.map(a => ({
-          number: a.number,
-          name: a.name,
-          currency: a.currency || 'RUR',
-          balance: a.balance ?? 0,
-          balanceSource: a.balance === null || a.balance === undefined ? 'unknown' : 'form',
-          status: 'Открыт',
-          seizureNotice: seizure?.seizureNotice,
-          seizureAccounts: seizure?.seizureAccounts,
-        }))
-      }
-      console.log('[accounts] счетов от банка:', own.length, '| со страницы было:', data.length)
+      own = await getAccountNames(USERNAME, PASSWORD)
     } catch (e) {
       console.warn('[accounts] список счетов из формы недоступен:', e.message)
+    }
+
+    if (own.length > 0) {
+      cachedOwnAccounts = own.map(a => ({
+        number: a.number,
+        name: a.name,
+        currency: a.currency || 'RUR',
+        balance: a.balance ?? 0,
+        balanceSource: (a.balance === null || a.balance === undefined) ? 'unknown' : 'form',
+        status: 'Открыт',
+      }))
+    }
+    console.log('[accounts] счетов от банка:', own.length, '| со страницы было:', data.length,
+      '| кэш:', cachedOwnAccounts ? cachedOwnAccounts.length : 0)
+
+    // Порядок надёжности: свежий достоверный список → последний удачный из кэша.
+    // Сырой список со страницы НЕ отдаём: в нём чужие счета, и на форме перевода
+    // из них можно ошибочно выбрать счёт.
+    let result
+    if (cachedOwnAccounts) {
+      // Аресты приклеиваем к текущему ответу
+      result = cachedOwnAccounts.map(a => ({ ...a, seizureNotice: seizure?.seizureNotice, seizureAccounts: seizure?.seizureAccounts }))
+    } else {
+      // Достоверного списка ещё не было — отдаём ошибку, а не мусор
+      return res.status(503).json({ success: false, error: 'Список счетов ещё загружается, повторите через несколько секунд' })
     }
 
     res.json({ success: true, data: result })
