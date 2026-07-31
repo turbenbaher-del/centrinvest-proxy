@@ -1,6 +1,6 @@
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, closeBrowser } = require('./browser')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -260,6 +260,31 @@ app.get('/api/documents', async (_, res) => {
   } catch (err) {
     console.error('[documents]', err.message)
     res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Подпись документа — двухшаговый поток с вводом ключа eToken.
+// Шаг 1: отправить на подпись и получить серийник токена для окна ввода.
+app.post('/api/documents/:id/sign/start', async (req, res) => {
+  try {
+    const data = await signStart(USERNAME, PASSWORD, { id: req.params.id })
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[sign start]', err.message)
+    res.status(400).json({ success: false, error: err.message })
+  }
+})
+
+// Шаг 2: пользователь ввёл ключ с токена — отправляем и ждём PayControl.
+app.post('/api/documents/:id/sign/key', async (req, res) => {
+  const { key } = req.body || {}
+  if (!key) return res.status(400).json({ success: false, error: 'не передан ключ токена' })
+  try {
+    const data = await signSubmitKey(USERNAME, PASSWORD, { id: req.params.id, key })
+    res.json({ success: data.stage !== 'error', data })
+  } catch (err) {
+    console.error('[sign key]', err.message)
+    res.status(400).json({ success: false, error: err.message })
   }
 })
 

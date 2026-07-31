@@ -2074,6 +2074,148 @@ async function documentAction(username, password, { id, action, confirm = false 
   }
 }
 
+// ─── Подпись документа с вводом ключа eToken ──────────────────────────────────
+// Двухшаговый интерактивный поток, пойманный на живой операции 31.07.2026:
+//   1) _saveAndSign по документу → банк просит выбрать средство подписи
+//      (cryptoProfileSelect) → форма ввода ключа eToken PASS с серийным номером;
+//   2) пользователь вводит ключ с аппаратного токена → eTokenPassSign/doAction →
+//      подтверждение в PayControl на телефоне (банк опрашивает статус).
+//
+// Между шагами держим состояние: та же сессия playwright и instanceToken'ы форм.
+// Ключ и подтверждение — только у владельца, подписать за него нельзя by design.
+
+const pendingSigns = new Map()  // id документа → { serial, tokens, startedAt }
+
+// Ищем в ответе банка форму по фрагменту имени и возвращаем её токен и поля
+function findForm(res, namePattern) {
+  const cmds = res.json?.commands || []
+  return cmds.find(c => namePattern.test(c.instanceName || ''))
+}
+
+// Достаём строковое значение поля независимо от обёртки {value}
+function fieldVal(f) {
+  if (f && typeof f === 'object' && !Array.isArray(f) && 'value' in f) return f.value
+  return f
+}
+
+/** Шаг 1: отправить документ на подпись и дойти до окна ввода ключа eToken. */
+async function signStart(username, password, { id }) {
+  if (!id) throw new Error('не передан id документа')
+
+  const p = await ensureLoggedIn(username, password)
+  const ready = await waitForAppReady(p, 45000)
+  if (!ready) throw new Error('Интерфейс ДБО не загрузился')
+
+  // Находим форму с документом (черновики или частично подписанные)
+  let target = null
+  for (const key of ['draft', 'partlySigned']) {
+    const r = await bankApi(p, 'POST', '/api/v1/menu/click', { menuItem: 'corporate-api-menu-small-r020statement' })
+    const cmd = findForm(r, new RegExp(DOC_FORMS[key].replace(/\//g, '\\/') + '$'))
+    if (!cmd?.instanceToken) continue
+    const items = cmd.fields?.payments?.items || []
+    if (items.some(it => String(fieldVal(it.id)) === String(id))) {
+      target = { key, form: DOC_FORMS[key], token: cmd.instanceToken, actions: Object.keys(cmd.actions || {}) }
+      break
+    }
+  }
+  if (!target) throw new Error('документ не найден среди черновиков и на подпись — возможно, уже подписан')
+
+  const signAction = target.actions.includes('_sign') ? '_sign'
+    : target.actions.includes('_saveAndSign') ? '_saveAndSign' : null
+  if (!signAction) throw new Error(`банк не предлагает подпись для этого документа (доступно: ${target.actions.join(', ')})`)
+
+  const formSeg = target.form.replace(/^ui\//, '')
+  // Выбор строки + действие подписи одним запросом
+  let res = await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/doAction`, {
+    actionId: signAction,
+    fields: { payments: { value: String(id) } },
+    instanceToken: target.token,
+  })
+  console.log('[sign] после', signAction, '→ формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
+
+  // Банк может сразу показать выбор средства подписи — подтверждаем текущий выбор
+  const cryptoForm = findForm(res, /cryptoProfileSelect/)
+  if (cryptoForm?.instanceToken) {
+    res = await bankApi(p, 'PUT', '/api/v1/client/cryptoProfileSelect/doAction', {
+      actionId: Object.keys(cryptoForm.actions || {}).find(a => /ok|select|confirm|sign|_/i.test(a)) || '_ok',
+      fields: {},
+      instanceToken: cryptoForm.instanceToken,
+    })
+    console.log('[sign] после cryptoProfileSelect → формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
+  }
+
+  // Форма ввода ключа eToken PASS — достаём серийный номер токена
+  const etoken = findForm(res, /eTokenPassSign|eToken/i)
+  if (!etoken?.instanceToken) {
+    // Не дошли до ввода ключа — вернём, что показал банк, для разбора
+    const errors = (res.json?.commands || []).flatMap(c => Object.entries(c.fields || {}))
+      .flatMap(([fid, f]) => (f.errors || []).map(e => `${fid}: ${e.message || e}`))
+    throw new Error('банк не запросил ключ eToken. ' + (errors.join('; ') || 'формы: ' + (res.json?.commands || []).map(c => c.instanceName).join(', ')))
+  }
+
+  const serialField = Object.entries(etoken.fields || {})
+    .find(([k]) => /serial|номер/i.test(k))
+  const serial = serialField ? String(fieldVal(serialField[1])) : ''
+
+  pendingSigns.set(String(id), {
+    token: etoken.instanceToken,
+    // Имена полей ключа/серийника логируем — на первом живом прогоне уточним
+    keyFieldName: Object.keys(etoken.fields || {}).find(k => /key|ключ|pass|code/i.test(k)) || 'key',
+    startedAt: Date.now(),
+  })
+  console.log('[sign] окно ключа eToken, серийник:', serial, '| поля:', Object.keys(etoken.fields || {}).join(', '))
+
+  return {
+    stage: 'needKey',
+    serial,
+    fields: Object.keys(etoken.fields || {}),
+  }
+}
+
+/** Шаг 2: отправить ключ с токена и дождаться подтверждения PayControl. */
+async function signSubmitKey(username, password, { id, key }) {
+  if (!key) throw new Error('не передан ключ токена')
+  const pend = pendingSigns.get(String(id))
+  if (!pend) throw new Error('подпись не начата или истекла — начните заново')
+
+  const p = await ensureLoggedIn(username, password)
+  let res = await bankApi(p, 'PUT', '/api/v1/client/eTokenPassSign/doAction', {
+    actionId: 'sign',
+    fields: { [pend.keyFieldName]: { value: String(key) } },
+    instanceToken: pend.token,
+  })
+  console.log('[sign] после ввода ключа → формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
+
+  // Ошибка ключа?
+  const keyErrors = (res.json?.commands || []).flatMap(c => Object.entries(c.fields || {}))
+    .flatMap(([fid, f]) => (f.errors || []).map(e => `${fid}: ${e.message || e}`))
+  if (keyErrors.length) { pendingSigns.delete(String(id)); return { stage: 'error', errors: keyErrors } }
+
+  // PayControl: банк ждёт подтверждения в приложении на телефоне — опрашиваем
+  const paycontrol = findForm(res, /paycontrol/i)
+  if (paycontrol?.instanceToken) {
+    for (let i = 0; i < 30; i++) {
+      const poll = await bankApi(p, 'PUT', '/api/v1/client/paycontrol/sign/doAction', {
+        actionId: 'check', fields: {}, instanceToken: paycontrol.instanceToken,
+      })
+      const text = JSON.stringify(poll.json || {})
+      if (/доставлен|подписан|success|signed|confirmed/i.test(text)) {
+        pendingSigns.delete(String(id))
+        return { stage: 'done', message: 'Документ подписан и доставлен в банк' }
+      }
+      if (/ошиб|отклон|error|reject|timeout/i.test(text)) {
+        pendingSigns.delete(String(id))
+        return { stage: 'error', errors: ['PayControl: подтверждение не получено'] }
+      }
+      await p.waitForTimeout(3000)
+    }
+    return { stage: 'waitingPayControl', message: 'Подтвердите операцию в приложении PayControl на телефоне' }
+  }
+
+  pendingSigns.delete(String(id))
+  return { stage: 'done', message: 'Документ подписан' }
+}
+
 /**
  * Разведка документного API: ищем, каким запросом банк отдаёт список документов
  * с идентификаторами и какие действия над ними доступны (подпись, удаление).
@@ -2198,4 +2340,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, closeBrowser }
