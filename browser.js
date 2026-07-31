@@ -2174,8 +2174,12 @@ async function transferOwnStructured(username, password, { fromAccount, toAccoun
   if (!payer) throw new Error('счёт списания не найден в форме: ' + fromAccount)
   if (!receiver) throw new Error('счёт зачисления не найден в форме: ' + toAccount)
 
-  // 2) Заполняем поля и сохраняем/подписываем
-  const action = sign ? '_saveAndSign' : '_save'
+  // 2) Заполняем поля и СОХРАНЯЕМ как документ.
+  // Всегда _save (создать документ), даже если запросили подпись: подпись
+  // требует интерактивного ввода ключа eToken + PayControl, а это отдельный шаг
+  // через окно подписи в разделе «Платежи». _saveAndSign здесь оставлял бы
+  // документ в подвешенном состоянии «ожидает подписи» и врал «отправлено».
+  const action = '_save'
   const fields = {
     payerAccountId: { value: payer.id },
     receiverAccountId: { value: receiver.id },
@@ -2204,16 +2208,13 @@ async function transferOwnStructured(username, password, { fromAccount, toAccoun
       continue
     }
 
-    // Подтверждение создания/подписи — успех
-    const ok = cmds.find(c => /confirmDialog|cryptoProfileSelect|eTokenPassSign/.test(c.instanceName || ''))
-    if (ok) {
-      // Для черновика успех — это закрытие формы; для подписи — начало флоу ключа
-      return { ok: true, sign, needsSign: sign, nextForm: ok.instanceName }
-    }
+    // Подтверждение создания документа — успех
+    const ok = cmds.find(c => /confirmDialog/.test(c.instanceName || ''))
+    if (ok) return { ok: true, saved: true }
 
-    // Форма закрылась без ошибок — черновик сохранён
+    // Форма закрылась без ошибок — документ сохранён
     const closed = cmds.some(c => c.command === 'formClose' && /r030accounts/.test(c.instanceName || ''))
-    if (closed) return { ok: true, sign, saved: true }
+    if (closed) return { ok: true, saved: true }
 
     break
   }
