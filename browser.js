@@ -1936,6 +1936,43 @@ async function getDocuments(username, password) {
   const ready = await waitForAppReady(p, 45000)
   if (!ready) throw new Error('Интерфейс ДБО не загрузился — банк не отдал содержимое страницы')
 
+  // Основной путь: спрашиваем формы у банка напрямую. Клики по вкладкам ненадёжны
+  // (данные уже в памяти страницы, новых запросов нет — слушать нечего), а этот
+  // способ уже доказал работоспособность: так подпись находит документ.
+  try {
+    const r = await bankApi(p, 'POST', '/api/v1/menu/click', { menuItem: 'corporate-api-menu-small-r020statement' })
+    const direct = []
+    const seenDirect = new Set()
+    for (const cmd of (r.json?.commands || [])) {
+      const items = cmd.fields?.payments?.items
+      if (!Array.isArray(items)) continue
+      for (const it of items) {
+        const id = String(fieldValue(it.id) ?? '')
+        if (!id || seenDirect.has(id)) continue
+        seenDirect.add(id)
+        direct.push({
+          id,
+          number: String(fieldValue(it.docNumber) ?? '').trim(),
+          account: String(fieldValue(it.payerAccount) ?? '').replace(/\D/g, ''),
+          recipient: String(fieldValue(it.receiverName) ?? '').trim(),
+          purpose: String(fieldValue(it.paymentPurpose) ?? '').trim(),
+          amount: -Math.abs(toAmount(fieldValue(it.documentSum))),
+          direction: 'out',
+          status: String(fieldValue(it.stateName) ?? '').trim() || 'НЕИЗВЕСТЕН',
+          stateCode: String(fieldValue(it.stateCode) ?? '').trim(),
+          actions: Array.isArray(it.actions) ? it.actions : Object.keys(it.actions || {}),
+        })
+      }
+    }
+    if (direct.length > 0) {
+      console.log(`[documents] получено напрямую из форм банка: ${direct.length}`)
+      return direct
+    }
+    console.log('[documents] прямой запрос форм пуст, пробую обход по вкладкам')
+  } catch (e) {
+    console.log('[documents] прямой запрос форм не удался:', e.message)
+  }
+
   const bodies = []
   const onResp = async (r) => {
     try {
