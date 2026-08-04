@@ -2023,12 +2023,27 @@ async function getDocuments(username, password) {
       await dismiss()
       // .first(): «Платежи» встречается и в меню, и во вкладках — строгий режим
       // Playwright отказывался кликать по нескольким совпадениям, и переход не шёл
-      await p.locator(`text=${label}`).first().click({ timeout: 6000 })
+      // force: обычный клик упирался в таймаут — от закрытой модалки остаётся
+      // невидимая подложка, которая перехватывает нажатия. force пропускает
+      // проверки перекрытия. Если и он не проходит — кликаем через DOM
+      // (интерфейс на React, обычное событие click он принимает).
+      try {
+        await p.locator(`text=${label}`).first().click({ timeout: 4000, force: true })
+      } catch {
+        const ok = await p.evaluate((lbl) => {
+          const el = [...document.querySelectorAll('*')].find(e => {
+            const own = [...e.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()
+            return own === lbl
+          })
+          if (!el) return false
+          el.click()
+          return true
+        }, label)
+        if (!ok) throw new Error('элемент не найден в разметке')
+      }
       await p.waitForTimeout(2500)
       visited.push(label)
     } catch (e) {
-      // Раньше ошибка молча проглатывалась, и было не понять, почему
-      // «вкладок пройдено: 0» при видимых на экране вкладках
       console.log(`[documents] клик «${label}» не удался:`, String(e.message).split('\n')[0].slice(0, 150))
     }
   }
