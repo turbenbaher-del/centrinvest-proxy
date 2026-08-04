@@ -2358,29 +2358,31 @@ async function signStart(username, password, { id }) {
   if (!signAction) throw new Error(`банк не предлагает подпись для этого документа (доступно: ${target.actions.join(', ')})`)
 
   const formSeg = target.form.replace(/^ui\//, '')
-  // Выбор строки + действие подписи одним запросом
+
+  // Выбор строки грида. По пойманному протоколу банк принимает значения ТОЛЬКО
+  // отдельным stateUpdate с submitField (так же выбирается счёт в форме
+  // перевода), а doAction идёт с пустыми fields.
+  await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/stateUpdate`, {
+    instanceToken: target.token,
+    fields: { payments: { value: String(id) } },
+    submitField: 'payments',
+  })
   let res = await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/doAction`, {
     actionId: signAction,
-    fields: { payments: { value: String(id) } },
+    fields: {},
     instanceToken: target.token,
   })
   console.log('[sign] после', signAction, '→ формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
 
-  // Пустой ответ = банк не понял, какую строку подписывать. В гриде платежей
-  // строка выбирается флагом selected (в отличие от шаблонов, где хватало
-  // value с id). Отмечаем строку отдельным запросом и повторяем действие.
+  // Запасной вариант: некоторые гриды принимают id прямо в действии
   if ((res.json?.commands || []).length === 0) {
-    console.log('[sign] пустой ответ — отмечаю строку через selected')
-    await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/stateUpdate`, {
-      fields: { payments: { items: [{ id: String(id), selected: true }] } },
-      instanceToken: target.token,
-    })
+    console.log('[sign] пустой ответ — пробую id внутри doAction')
     res = await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/doAction`, {
       actionId: signAction,
-      fields: {},
+      fields: { payments: { value: String(id) } },
       instanceToken: target.token,
     })
-    console.log('[sign] после отметки+', signAction, '→ формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
+    console.log('[sign] запасной вариант →', (res.json?.commands || []).map(c => c.instanceName).join(', '))
   }
 
   // Выбор средства подписи. Протокол пойман с живой подписи: значение уходит
