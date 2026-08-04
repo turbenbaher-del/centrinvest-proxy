@@ -1926,6 +1926,14 @@ const toAmount = (x) => {
 
 async function getDocuments(username, password) {
   const p = await ensureLoggedIn(username, password)
+
+  // Сбрасываем состояние: незавершённая подпись или открытая форма оставляют
+  // диалог поверх страницы, и клики по вкладкам не срабатывают («вкладок
+  // пройдено: 0», документов ноль). Перезаход в интерфейс закрывает всё.
+  try {
+    await p.goto('https://dbo.centrinvest.ru/api-ui/', { waitUntil: 'commit', timeout: 30000 })
+  } catch {}
+
   const ready = await waitForAppReady(p, 45000)
   if (!ready) throw new Error('Интерфейс ДБО не загрузился — банк не отдал содержимое страницы')
 
@@ -2292,6 +2300,13 @@ async function signStart(username, password, { id }) {
   if (!id) throw new Error('не передан id документа')
 
   const p = await ensureLoggedIn(username, password)
+
+  // Сброс состояния: незакрытый диалог от прошлой попытки блокирует клики
+  // по вкладкам, и документ «не находится».
+  try {
+    await p.goto('https://dbo.centrinvest.ru/api-ui/', { waitUntil: 'commit', timeout: 30000 })
+  } catch {}
+
   const ready = await waitForAppReady(p, 45000)
   if (!ready) throw new Error('Интерфейс ДБО не загрузился')
 
