@@ -1964,6 +1964,12 @@ async function getDocuments(username, password) {
     } catch {}
   }
 
+  // После перезагрузки интерфейса вкладки появляются не сразу. Без ожидания
+  // клики уходили в пустоту: «вкладок пройдено: 0», документов ноль.
+  try {
+    await p.locator('text=Черновики').first().waitFor({ state: 'visible', timeout: 25000 })
+  } catch { console.warn('[documents] вкладки статусов так и не появились') }
+
   // Открываем платежи и проходим по вкладкам статусов — каждая отдаёт свою форму
   const visited = []
   for (const label of ['Платежи', ...Object.values(PAYMENT_FORMS).map(f => f.tab)]) {
