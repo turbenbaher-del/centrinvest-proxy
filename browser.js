@@ -1949,17 +1949,49 @@ async function getDocuments(username, password) {
   }
   p.on('response', onResp)
 
+  // Закрытие модального окна банка («обязательно к прочтению»). Оно перекрывает
+  // весь интерфейс: вкладок статусов не видно, клики не проходят, документов ноль.
+  // Программный .click() в ZK-виджете не срабатывал — нужен настоящий клик
+  // Playwright, поэтому сначала находим кнопку, потом кликаем ею.
   const dismiss = async () => {
-    try {
-      await p.evaluate(() => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const info = await p.evaluate(() => {
         const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
-        if (m) {
-          const bs = Array.from(m.querySelectorAll('button,[role=button]'))
-          const b = bs[bs.length - 1]; if (b) b.click(); else m.remove()
-        }
-      })
-    } catch {}
+        if (!m) return null
+        const bs = [...m.querySelectorAll('button,[role=button],a')]
+          .map(b => (b.textContent || '').trim().slice(0, 30))
+          .filter(Boolean)
+        return { buttons: bs }
+      }).catch(() => null)
+
+      if (!info) return true                       // окна нет — всё чисто
+      if (attempt === 0) console.log('[documents] модалка, кнопки:', JSON.stringify(info.buttons))
+
+      let clicked = false
+      for (const label of ['Ознакомлен', 'Понятно', 'Закрыть', 'ОК', 'Продолжить', 'Прочитано']) {
+        try {
+          await p.locator(`[data-at="modal-ui/messages/mustRead"] >> text=${label}`).first().click({ timeout: 2000 })
+          clicked = true; break
+        } catch {}
+      }
+      if (!clicked) {
+        try {
+          await p.locator('[data-at="modal-ui/messages/mustRead"] button').last().click({ timeout: 2000 })
+          clicked = true
+        } catch {}
+      }
+      if (!clicked) {
+        await p.evaluate(() => {
+          document.querySelector('[data-at="modal-ui/messages/mustRead"]')?.remove()
+        }).catch(() => {})
+      }
+      await p.waitForTimeout(1200)
+    }
+    return true
   }
+
+  // Закрываем окно ДО диагностики и кликов, а не только внутри цикла
+  await dismiss()
 
   // Диагностика: что реально на странице в момент кликов. Логи говорили
   // «вкладок пройдено: 0», хотя вкладки на экране есть — смотрим фактами.
