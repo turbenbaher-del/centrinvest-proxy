@@ -2295,19 +2295,63 @@ async function signStart(username, password, { id }) {
   const ready = await waitForAppReady(p, 45000)
   if (!ready) throw new Error('Интерфейс ДБО не загрузился')
 
-  // Находим форму с документом (черновики или частично подписанные)
+  // Находим форму с документом. menu/click отдаёт ту вкладку, что открыта
+  // сейчас (обычно «Выполненные»), поэтому проходим по вкладкам статусов —
+  // тем же приёмом, что уже работает в getDocuments.
   let target = null
-  for (const key of ['draft', 'partlySigned']) {
-    const r = await bankApi(p, 'POST', '/api/v1/menu/click', { menuItem: 'corporate-api-menu-small-r020statement' })
-    const cmd = findForm(r, new RegExp(DOC_FORMS[key].replace(/\//g, '\\/') + '$'))
-    if (!cmd?.instanceToken) continue
-    const items = cmd.fields?.payments?.items || []
-    if (items.some(it => String(fieldVal(it.id)) === String(id))) {
-      target = { key, form: DOC_FORMS[key], token: cmd.instanceToken, actions: Object.keys(cmd.actions || {}) }
-      break
+  const tabs = [
+    { key: 'draft', label: 'Черновики' },
+    { key: 'partlySigned', label: 'На подпись' },
+  ]
+
+  const dismiss = async () => {
+    try {
+      await p.evaluate(() => {
+        const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (m) { const bs = [...m.querySelectorAll('button,[role=button]')]; const b = bs[bs.length - 1]; if (b) b.click(); else m.remove() }
+      })
+    } catch {}
+  }
+
+  // Слушаем ответы банка, пока кликаем по вкладкам — из них достаём форму
+  const captured = []
+  const onResp = async (r) => {
+    try {
+      const u = r.url()
+      if (!u.includes('/api/v1') || r.status() !== 200) return
+      if (!(r.headers()['content-type'] || '').includes('json')) return
+      const b = await r.text()
+      if (b.length > 100) captured.push(b)
+    } catch {}
+  }
+  p.on('response', onResp)
+
+  await dismiss()
+  try { await p.click('text=Платежи', { timeout: 3000 }); await p.waitForTimeout(1500) } catch {}
+  for (const t of tabs) {
+    try { await dismiss(); await p.click(`text=${t.label}`, { timeout: 3000 }); await p.waitForTimeout(2500) } catch {}
+  }
+  await p.waitForTimeout(1000)
+  p.off('response', onResp)
+
+  // Ищем в захваченном трафике форму, где лежит наш документ
+  for (const body of captured) {
+    let parsed
+    try { parsed = JSON.parse(body) } catch { continue }
+    for (const cmd of (parsed.commands || [])) {
+      const name = cmd.instanceName || ''
+      const tab = tabs.find(t => DOC_FORMS[t.key] === name)
+      if (!tab || !cmd.instanceToken) continue
+      const items = cmd.fields?.payments?.items || []
+      if (items.some(it => String(fieldVal(it.id)) === String(id))) {
+        target = { key: tab.key, form: name, token: cmd.instanceToken, actions: Object.keys(cmd.actions || {}) }
+        break
+      }
     }
+    if (target) break
   }
   if (!target) throw new Error('документ не найден среди черновиков и на подпись — возможно, уже подписан')
+  console.log('[sign] документ найден в', target.form, '| действия:', target.actions.join(', '))
 
   const signAction = target.actions.includes('_sign') ? '_sign'
     : target.actions.includes('_saveAndSign') ? '_saveAndSign' : null
@@ -2321,6 +2365,23 @@ async function signStart(username, password, { id }) {
     instanceToken: target.token,
   })
   console.log('[sign] после', signAction, '→ формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
+
+  // Пустой ответ = банк не понял, какую строку подписывать. В гриде платежей
+  // строка выбирается флагом selected (в отличие от шаблонов, где хватало
+  // value с id). Отмечаем строку отдельным запросом и повторяем действие.
+  if ((res.json?.commands || []).length === 0) {
+    console.log('[sign] пустой ответ — отмечаю строку через selected')
+    await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/stateUpdate`, {
+      fields: { payments: { items: [{ id: String(id), selected: true }] } },
+      instanceToken: target.token,
+    })
+    res = await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/doAction`, {
+      actionId: signAction,
+      fields: {},
+      instanceToken: target.token,
+    })
+    console.log('[sign] после отметки+', signAction, '→ формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
+  }
 
   // Банк может сразу показать выбор средства подписи — подтверждаем текущий выбор
   const cryptoForm = findForm(res, /cryptoProfileSelect/)
