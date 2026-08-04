@@ -1768,7 +1768,9 @@ async function getSectionData(username, password, key) {
   for (const label of section.labels) {
     try {
       await dismiss()
-      await p.click(`text=${label}`, { timeout: 3000 })
+      // .first(): «Платежи» встречается и в меню, и во вкладках — строгий режим
+      // Playwright отказывался кликать по нескольким совпадениям, и переход не шёл
+      await p.locator(`text=${label}`).first().click({ timeout: 6000 })
       await p.waitForTimeout(2500)
       navigated = true
       console.log(`[section:${key}] clicked`, label)
@@ -1967,7 +1969,9 @@ async function getDocuments(username, password) {
   for (const label of ['Платежи', ...Object.values(PAYMENT_FORMS).map(f => f.tab)]) {
     try {
       await dismiss()
-      await p.click(`text=${label}`, { timeout: 3000 })
+      // .first(): «Платежи» встречается и в меню, и во вкладках — строгий режим
+      // Playwright отказывался кликать по нескольким совпадениям, и переход не шёл
+      await p.locator(`text=${label}`).first().click({ timeout: 6000 })
       await p.waitForTimeout(2500)
       visited.push(label)
     } catch {}
@@ -2342,9 +2346,11 @@ async function signStart(username, password, { id }) {
   p.on('response', onResp)
 
   await dismiss()
-  try { await p.click('text=Платежи', { timeout: 3000 }); await p.waitForTimeout(1500) } catch {}
+  // .first(): «Платежи» есть и в меню, и во вкладках — при нескольких совпадениях
+  // строгий режим Playwright отказывается кликать, и переход молча не происходил
+  try { await p.locator('text=Платежи').first().click({ timeout: 6000 }); await p.waitForTimeout(1500) } catch {}
   for (const t of tabs) {
-    try { await dismiss(); await p.click(`text=${t.label}`, { timeout: 3000 }); await p.waitForTimeout(2500) } catch {}
+    try { await dismiss(); await p.locator(`text=${t.label}`).first().click({ timeout: 6000 }); await p.waitForTimeout(2500) } catch {}
   }
   await p.waitForTimeout(1000)
   p.off('response', onResp)
@@ -2554,7 +2560,9 @@ async function reconDocuments(username, password) {
   for (const label of ['Платежи', 'Черновики', 'На подпись', 'В обработке', 'Отклоненные', 'Выполненные']) {
     try {
       await dismiss()
-      await p.click(`text=${label}`, { timeout: 3000 })
+      // .first(): «Платежи» встречается и в меню, и во вкладках — строгий режим
+      // Playwright отказывался кликать по нескольким совпадениям, и переход не шёл
+      await p.locator(`text=${label}`).first().click({ timeout: 6000 })
       await p.waitForTimeout(2500)
       visited.push(label)
     } catch {}
