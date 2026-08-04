@@ -2026,7 +2026,11 @@ async function getDocuments(username, password) {
       await p.locator(`text=${label}`).first().click({ timeout: 6000 })
       await p.waitForTimeout(2500)
       visited.push(label)
-    } catch {}
+    } catch (e) {
+      // Раньше ошибка молча проглатывалась, и было не понять, почему
+      // «вкладок пройдено: 0» при видимых на экране вкладках
+      console.log(`[documents] клик «${label}» не удался:`, String(e.message).split('\n')[0].slice(0, 150))
+    }
   }
   await p.waitForTimeout(1500)
   p.off('response', onResp)
