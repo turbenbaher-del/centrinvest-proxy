@@ -2383,11 +2383,22 @@ async function signStart(username, password, { id }) {
     console.log('[sign] после отметки+', signAction, '→ формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
   }
 
-  // Банк может сразу показать выбор средства подписи — подтверждаем текущий выбор
+  // Выбор средства подписи. Протокол пойман с живой подписи: значение уходит
+  // отдельным stateUpdate с submitField, а doAction идёт с пустыми fields
+  // и actionId "_save" (не "_ok").
   const cryptoForm = findForm(res, /cryptoProfileSelect/)
   if (cryptoForm?.instanceToken) {
+    const profiles = cryptoForm.fields?.cryptoProfiles
+    const chosen = fieldVal(profiles) || (profiles?.items || [])[0]?.id
+    if (chosen) {
+      await bankApi(p, 'PUT', '/api/v1/client/cryptoProfileSelect/stateUpdate', {
+        instanceToken: cryptoForm.instanceToken,
+        fields: { cryptoProfiles: { value: String(chosen) } },
+        submitField: 'cryptoProfiles',
+      })
+    }
     res = await bankApi(p, 'PUT', '/api/v1/client/cryptoProfileSelect/doAction', {
-      actionId: Object.keys(cryptoForm.actions || {}).find(a => /ok|select|confirm|sign|_/i.test(a)) || '_ok',
+      actionId: '_save',
       fields: {},
       instanceToken: cryptoForm.instanceToken,
     })
@@ -2409,8 +2420,8 @@ async function signStart(username, password, { id }) {
 
   pendingSigns.set(String(id), {
     token: etoken.instanceToken,
-    // Имена полей ключа/серийника логируем — на первом живом прогоне уточним
-    keyFieldName: Object.keys(etoken.fields || {}).find(k => /key|ключ|pass|code/i.test(k)) || 'key',
+    // Поле ключа называется "key" — подтверждено перехватом живой подписи
+    keyFieldName: Object.keys(etoken.fields || {}).find(k => /^key$/i.test(k)) || 'key',
     startedAt: Date.now(),
   })
   console.log('[sign] окно ключа eToken, серийник:', serial, '| поля:', Object.keys(etoken.fields || {}).join(', '))
@@ -2429,9 +2440,18 @@ async function signSubmitKey(username, password, { id, key }) {
   if (!pend) throw new Error('подпись не начата или истекла — начните заново')
 
   const p = await ensureLoggedIn(username, password)
-  let res = await bankApi(p, 'PUT', '/api/v1/client/eTokenPassSign/doAction', {
-    actionId: 'sign',
+
+  // Протокол пойман с живой подписи: значение ключа уходит ОТДЕЛЬНЫМ stateUpdate
+  // с submitField, а подтверждение — doAction с actionId "ready" и пустыми fields.
+  // Раньше ключ слался внутри doAction с actionId "sign" — банк это игнорировал.
+  await bankApi(p, 'PUT', '/api/v1/client/eTokenPassSign/stateUpdate', {
+    instanceToken: pend.token,
     fields: { [pend.keyFieldName]: { value: String(key) } },
+    submitField: pend.keyFieldName,
+  })
+  let res = await bankApi(p, 'PUT', '/api/v1/client/eTokenPassSign/doAction', {
+    actionId: 'ready',
+    fields: {},
     instanceToken: pend.token,
   })
   console.log('[sign] после ввода ключа → формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
@@ -2445,8 +2465,9 @@ async function signSubmitKey(username, password, { id, key }) {
   const paycontrol = findForm(res, /paycontrol/i)
   if (paycontrol?.instanceToken) {
     for (let i = 0; i < 30; i++) {
+      // Опрос статуса PayControl — банк использует actionId "_onTimer"
       const poll = await bankApi(p, 'PUT', '/api/v1/client/paycontrol/sign/doAction', {
-        actionId: 'check', fields: {}, instanceToken: paycontrol.instanceToken,
+        actionId: '_onTimer', instanceToken: paycontrol.instanceToken,
       })
       const text = JSON.stringify(poll.json || {})
       if (/доставлен|подписан|success|signed|confirmed/i.test(text)) {
