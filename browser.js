@@ -1961,11 +1961,28 @@ async function getDocuments(username, password) {
     } catch {}
   }
 
-  // После перезагрузки интерфейса вкладки появляются не сразу. Без ожидания
-  // клики уходили в пустоту: «вкладок пройдено: 0», документов ноль.
+  // Диагностика: что реально на странице в момент кликов. Логи говорили
+  // «вкладок пройдено: 0», хотя вкладки на экране есть — смотрим фактами.
   try {
-    await p.locator('text=Черновики').first().waitFor({ state: 'visible', timeout: 25000 })
-  } catch { console.warn('[documents] вкладки статусов так и не появились') }
+    const diag = await p.evaluate(() => {
+      const txt = (document.body.innerText || '').replace(/\s+/g, ' ')
+      const hasDraft = /Черновики/.test(txt)
+      // Все элементы, чей собственный текст — «Черновики»
+      const els = [...document.querySelectorAll('*')].filter(e => {
+        const own = [...e.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()
+        return own === 'Черновики'
+      })
+      return {
+        urlPath: location.pathname,
+        текстСодержитЧерновики: hasDraft,
+        совпаденийЧерновики: els.length,
+        первыйЭлемент: els[0] ? { tag: els[0].tagName, cls: String(els[0].className).slice(0, 60) } : null,
+        видимость: els[0] ? (els[0].getBoundingClientRect().width > 0) : null,
+        модалка: !!document.querySelector('[data-at="modal-ui/messages/mustRead"]'),
+      }
+    })
+    console.log('[documents] диагностика страницы:', JSON.stringify(diag))
+  } catch (e) { console.log('[documents] диагностика не удалась:', e.message) }
 
   // Открываем платежи и проходим по вкладкам статусов — каждая отдаёт свою форму
   const visited = []
