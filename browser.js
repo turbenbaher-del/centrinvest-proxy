@@ -123,14 +123,9 @@ async function ensureLoggedIn(username, password) {
       await page.waitForTimeout(4000)
     }
 
-    // Ссылки может не быть вовсе — тогда переходим напрямую: мы уже авторизованы,
-    // сессия должна перенестись на новый интерфейс.
-    if (page.url().includes('main.zul')) {
-      try {
-        await page.goto(API_UI_URL, { waitUntil: 'commit', timeout: 30000 })
-        await page.waitForTimeout(4000)
-      } catch {}
-    }
+    // Прямой переход на api-ui НЕ делаем: он сбрасывает на страницу входа и
+    // ломает уже готовую сессию. Новый интерфейс требует, чтобы банк сам
+    // открыл его после логина — это настройка учётной записи в ДБО.
     console.log('[browser] После перехода в новый интерфейс, URL:', page.url())
   }
 
