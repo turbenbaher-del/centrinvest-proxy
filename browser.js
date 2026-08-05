@@ -89,6 +89,24 @@ async function ensureLoggedIn(username, password) {
   // а запасной вариант — клик через DOM.
   if (page.url().includes('main.zul')) {
     await page.waitForTimeout(2500)
+    // Диагностика: как на самом деле выглядит ссылка перехода в старом интерфейсе
+    try {
+      const d = await page.evaluate(() => {
+        const txt = (document.body.innerText || '').replace(/\s+/g, ' ')
+        const els = [...document.querySelectorAll('a,button,span,div,td')].filter(e =>
+          /нов\w* интерфейс/i.test(e.textContent || ''))
+        return {
+          естьТекст: /нов\w* интерфейс/i.test(txt),
+          найдено: els.length,
+          образцы: els.slice(0, 3).map(e => ({
+            tag: e.tagName, id: e.id || '', cls: String(e.className).slice(0, 40),
+            href: e.getAttribute('href') || '', onclick: !!e.onclick,
+            текст: (e.textContent || '').trim().slice(0, 40),
+          })),
+        }
+      })
+      console.log('[browser] ссылка «новый интерфейс»:', JSON.stringify(d))
+    } catch {}
     for (let attempt = 0; attempt < 2 && page.url().includes('main.zul'); attempt++) {
       try {
         await page.locator('text=В новый интерфейс').first().click({ timeout: 5000, force: true })
