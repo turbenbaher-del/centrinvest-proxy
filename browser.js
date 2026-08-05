@@ -83,6 +83,29 @@ async function ensureLoggedIn(username, password) {
     throw new Error('Банк не отвечает на вход — вероятно, временное ограничение. Повторите через 1–2 минуты.')
   }
 
+  // Банк помнит выбранный интерфейс. Если он открыл СТАРЫЙ (sbns-web/main.zul),
+  // весь структурный код работать не будет — переходим по ссылке «В новый
+  // интерфейс». Обычный клик по ней не проходит (ZK-виджет), поэтому force,
+  // а запасной вариант — клик через DOM.
+  if (page.url().includes('main.zul')) {
+    await page.waitForTimeout(2500)
+    for (let attempt = 0; attempt < 2 && page.url().includes('main.zul'); attempt++) {
+      try {
+        await page.locator('text=В новый интерфейс').first().click({ timeout: 5000, force: true })
+      } catch {
+        await page.evaluate(() => {
+          const el = [...document.querySelectorAll('*')].find(e => {
+            const own = [...e.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()
+            return own === 'В новый интерфейс'
+          })
+          el?.click()
+        }).catch(() => {})
+      }
+      await page.waitForTimeout(4000)
+    }
+    console.log('[browser] После перехода в новый интерфейс, URL:', page.url())
+  }
+
   await waitForAppReady(page)
 
   console.log('[browser] Logged in, URL:', page.url())
