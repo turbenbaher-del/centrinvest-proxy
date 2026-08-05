@@ -107,9 +107,10 @@ async function ensureLoggedIn(username, password) {
       })
       console.log('[browser] ссылка «новый интерфейс»:', JSON.stringify(d))
     } catch {}
+    // Сначала пробуем ссылку, если она есть на странице
     for (let attempt = 0; attempt < 2 && page.url().includes('main.zul'); attempt++) {
       try {
-        await page.locator('text=В новый интерфейс').first().click({ timeout: 5000, force: true })
+        await page.locator('text=В новый интерфейс').first().click({ timeout: 4000, force: true })
       } catch {
         await page.evaluate(() => {
           const el = [...document.querySelectorAll('*')].find(e => {
@@ -120,6 +121,15 @@ async function ensureLoggedIn(username, password) {
         }).catch(() => {})
       }
       await page.waitForTimeout(4000)
+    }
+
+    // Ссылки может не быть вовсе — тогда переходим напрямую: мы уже авторизованы,
+    // сессия должна перенестись на новый интерфейс.
+    if (page.url().includes('main.zul')) {
+      try {
+        await page.goto(API_UI_URL, { waitUntil: 'commit', timeout: 30000 })
+        await page.waitForTimeout(4000)
+      } catch {}
     }
     console.log('[browser] После перехода в новый интерфейс, URL:', page.url())
   }
