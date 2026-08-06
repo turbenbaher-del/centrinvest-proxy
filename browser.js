@@ -123,9 +123,21 @@ async function ensureLoggedIn(username, password) {
       await page.waitForTimeout(4000)
     }
 
-    // Прямой переход на api-ui НЕ делаем: он сбрасывает на страницу входа и
-    // ломает уже готовую сессию. Новый интерфейс требует, чтобы банк сам
-    // открыл его после логина — это настройка учётной записи в ДБО.
+    // Прямой переход на новый интерфейс. Раньше он сбрасывал на форму входа,
+    // но, похоже, потому что делался слишком рано — до того как сессия
+    // закрепилась. Даём старому интерфейсу догрузиться и только потом идём.
+    if (page.url().includes('main.zul')) {
+      try {
+        await page.waitForLoadState('load', { timeout: 20000 }).catch(() => {})
+        await page.waitForTimeout(6000)
+        console.log('[browser] старый интерфейс загружен, перехожу в новый')
+        await page.goto(API_UI_URL, { waitUntil: 'commit', timeout: 30000 })
+        await page.waitForTimeout(5000)
+        console.log('[browser] URL после перехода:', page.url())
+      } catch (e) {
+        console.log('[browser] переход в новый интерфейс не удался:', e.message)
+      }
+    }
     console.log('[browser] После перехода в новый интерфейс, URL:', page.url())
   }
 
