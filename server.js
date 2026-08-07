@@ -23,16 +23,41 @@ const app = express()
 const PORT = process.env.PORT || 3001
 
 // ─── Доступы ────────────────────────────────────────────────────────────────
-// Креды ДБО берём ТОЛЬКО из окружения. Раньше здесь стояли боевые значения
-// по умолчанию — на публичном хостинге это отдавало счёта и выписки любому,
-// кто знал адрес сервиса.
-const USERNAME = process.env.DBO_LOGIN
-const PASSWORD = process.env.DBO_PASSWORD
-const CONFIGURED = !!(USERNAME && PASSWORD)
-if (!CONFIGURED) {
-  // Не падаем: иначе деплой уходит в бесконечный перезапуск и сервис недоступен целиком.
-  // Поднимаемся, но на все банковские запросы честно отвечаем 503.
-  console.error('[fatal] Не заданы DBO_LOGIN и DBO_PASSWORD. Задайте их в переменных окружения (на Railway — Variables).')
+// Пароль ДБО НЕ хранится на сервере постоянно. Он приходит от владельца при
+// входе и живёт только в оперативной памяти активной сессии: на диск не
+// пишется, в логи не попадает, после простоя стирается. Постоянное хранение
+// пароля от банка на стороннем хостинге — главный риск такой архитектуры,
+// и держать его там незачем.
+//
+// Переменные окружения остаются как ЗАПАСНОЙ режим (например, для проверок
+// без участия человека). Если они не заданы — это норма, а не ошибка.
+const ENV_LOGIN = process.env.DBO_LOGIN
+const ENV_PASSWORD = process.env.DBO_PASSWORD
+
+// Время бездействия, после которого пароль стирается из памяти
+const CREDS_TTL_MS = 30 * 60 * 1000
+
+let liveSession = null   // { login, password, lastUsedAt }
+
+/** Учётные данные текущей сессии или null, если входа не было. */
+function dbo() {
+  if (liveSession) {
+    if (Date.now() - liveSession.lastUsedAt < CREDS_TTL_MS) {
+      liveSession.lastUsedAt = Date.now()
+      return liveSession
+    }
+    liveSession = null
+    console.log('[auth] сессия истекла — пароль стёрт из памяти')
+  }
+  if (ENV_LOGIN && ENV_PASSWORD) return { login: ENV_LOGIN, password: ENV_PASSWORD }
+  return null
+}
+
+/** Есть ли чем ходить в банк прямо сейчас. */
+const hasCreds = () => !!dbo()
+
+if (!ENV_LOGIN || !ENV_PASSWORD) {
+  console.log('[auth] пароль ДБО на сервере не хранится — ожидается вход владельца')
 }
 
 // Токен доступа к самому прокси: без него любой запрос отклоняется.
@@ -76,19 +101,22 @@ app.use((req, res, next) => {
 
 app.get('/health', (_, res) => {
   res.json({
-    status: CONFIGURED ? 'ok' : 'misconfigured',
-    // Видно в мониторинге, что сервис жив, но креды ДБО не заданы
-    dboConfigured: CONFIGURED,
+    status: hasCreds() ? 'ok' : 'awaiting-login',
+    // Пароль не хранится: сервис жив, но до входа владельца в банк не ходит
+    dboReady: hasCreds(),
     time: new Date().toISOString(),
   })
 })
 
-// Без кредов ДБО банковские маршруты отвечают понятной ошибкой, а не падают
+// До входа владельца ходить в банк нечем — отвечаем понятно, а не падаем.
+// /api/login исключён: это и есть вход.
 app.use((req, res, next) => {
-  if (CONFIGURED || req.path === '/health' || req.method === 'OPTIONS') return next()
-  res.status(503).json({
+  if (req.path === '/health' || req.path === '/api/login' || req.method === 'OPTIONS') return next()
+  if (hasCreds()) return next()
+  res.status(401).json({
     success: false,
-    error: 'Прокси не настроен: не заданы DBO_LOGIN и DBO_PASSWORD',
+    error: 'Требуется вход: пароль ДБО не хранится на сервере',
+    needLogin: true,
   })
 })
 
@@ -137,22 +165,40 @@ let whoAmIWarming = false
 
 app.post('/api/login', async (req, res) => {
   const { login, password } = req.body || {}
-  if (login !== USERNAME || password !== PASSWORD) {
-    return res.status(401).json({ success: false, error: 'Неверные учетные данные' })
+  if (!login || !password) {
+    return res.status(400).json({ success: false, error: 'Введите логин и пароль' })
   }
-  // Вход отвечает СРАЗУ. Раньше здесь ждали getWhoAmI — полный заход в банк
-  // на 40-90 c; на телефоне сервис-воркер обрывал запрос по таймауту и человек
-  // видел «Failed to fetch» вместо входа. Имя банка не нужно для входа: пароль
-  // уже проверен, а сессию прогреваем фоном, чтобы первый экран открылся быстро.
+
+  // Пароль принимаем от владельца и держим ТОЛЬКО в памяти. Сверять его
+  // с переменными окружения больше не с чем — и не нужно: правильность
+  // проверит сам банк при входе.
+  liveSession = { login, password, lastUsedAt: Date.now() }
+
+  // Отвечаем СРАЗУ: полный заход в банк занимает 40-90 c, и сервис-воркер
+  // на телефоне обрывал такой запрос по таймауту — человек видел
+  // «Failed to fetch» вместо входа. Сессию прогреваем фоном.
   res.json({ success: true, name: cachedWhoAmI || login })
 
-  if (!cachedWhoAmI && !whoAmIWarming) {
+  if (!whoAmIWarming) {
     whoAmIWarming = true
-    getWhoAmI(USERNAME, PASSWORD)
-      .then(name => { if (name) { cachedWhoAmI = name; console.log('[login] имя клиента:', name) } })
-      .catch(err => console.error('[login] прогрев не удался:', err.message))
+    getWhoAmI(login, password)
+      .then(name => { if (name) { cachedWhoAmI = name; console.log('[login] вход выполнен:', name) } })
+      .catch(err => {
+        // Банк не пустил — держать неверный пароль в памяти незачем
+        console.error('[login] вход не удался:', err.message)
+        if (liveSession?.password === password) liveSession = null
+      })
       .finally(() => { whoAmIWarming = false })
   }
+})
+
+// Выход: стираем пароль из памяти немедленно, не дожидаясь таймаута.
+app.post('/api/session/end', (_, res) => {
+  liveSession = null
+  cachedWhoAmI = null
+  invalidateCache()
+  console.log('[auth] выход — пароль стёрт из памяти')
+  res.json({ success: true })
 })
 
 // Имя клиента отдельным запросом — приложение подтягивает его, когда придёт.
@@ -169,10 +215,10 @@ app.get('/api/accounts', async (req, res) => {
   try {
     // Кэшируем оба захода в банк разом: страницу счетов и форму платежа
     const { data, own } = await cached('accounts', CACHE_TTL_MS, async () => {
-      const pageAccounts = await getAccountsData(USERNAME, PASSWORD)
+      const pageAccounts = await getAccountsData(dbo().login, dbo().password)
       let names = []
       try {
-        names = await getAccountNames(USERNAME, PASSWORD)
+        names = await getAccountNames(dbo().login, dbo().password)
       } catch (e) {
         console.warn('[accounts] список счетов из формы недоступен:', e.message)
       }
@@ -214,7 +260,7 @@ app.get('/api/accounts', async (req, res) => {
 
 app.get('/api/payments', async (req, res) => {
   try {
-    const data = await cached('payments', CACHE_TTL_MS, () => getPaymentsData(USERNAME, PASSWORD))
+    const data = await cached('payments', CACHE_TTL_MS, () => getPaymentsData(dbo().login, dbo().password))
     res.json({ success: true, data })
   } catch (err) {
     console.error('[payments]', err.message)
@@ -226,7 +272,7 @@ app.get('/api/payments', async (req, res) => {
 // поэтому ищем операцию в свежем списке по её устойчивому ключу (дата|номер|сумма).
 app.get('/api/payments/:id', async (req, res) => {
   try {
-    const list = await getPaymentsData(USERNAME, PASSWORD)
+    const list = await getPaymentsData(dbo().login, dbo().password)
     const found = (list || []).find(p => p.id === req.params.id)
     if (!found) return res.status(404).json({ success: false, error: 'Операция не найдена в выписке' })
     res.json({ success: true, data: found })
@@ -258,7 +304,7 @@ app.post('/api/payments', async (req, res) => {
   const body = req.body || {}
   try {
     // sign=false → save as DRAFT (no money). Real send only when body.sign === true.
-    const result = await webpay.submitPayment(USERNAME, PASSWORD, mapPayment(body), { sign: !!body.sign })
+    const result = await webpay.submitPayment(dbo().login, dbo().password, mapPayment(body), { sign: !!body.sign })
     res.json({ success: !!result.ok, data: result })
   } catch (err) {
     console.error('[payments POST]', err.message)
@@ -284,7 +330,7 @@ app.get('/debug/contractors-raw', async (req, res) => {
     // Re-use session via the module-level page
     const mod = require('./browser')
     // Just get DOM text of current page
-    const data = await mod.getAccountsDomDebug(USERNAME, PASSWORD)
+    const data = await mod.getAccountsDomDebug(dbo().login, dbo().password)
     const text = data.domTextPreview || ''
     const payments = text.split('\n').filter(l => /^\d{2}\.\d{2}\.\d{4}$/.test(l.trim()))
     res.json({
@@ -301,7 +347,7 @@ app.get('/debug/contractors-raw', async (req, res) => {
 
 app.get('/api/contractors', async (req, res) => {
   try {
-    const data = await getContractorsFromHistory(USERNAME, PASSWORD)
+    const data = await getContractorsFromHistory(dbo().login, dbo().password)
     res.json({ success: true, data })
   } catch (err) {
     console.error('[contractors]', err.message)
@@ -311,7 +357,7 @@ app.get('/api/contractors', async (req, res) => {
 
 app.get('/api/tariffs', async (req, res) => {
   try {
-    const data = await getTariffs(USERNAME, PASSWORD)
+    const data = await getTariffs(dbo().login, dbo().password)
     res.json({ success: true, data })
   } catch (err) {
     console.error('[tariffs]', err.message)
@@ -326,7 +372,7 @@ app.post('/api/transfer-own', async (req, res) => {
   try {
     // Структурный API вместо кликов по форме: счета выбираются по идентификатору,
     // поэтому не бывает «счёт получателя не выбран». success = реальный итог банка.
-    const data = await transferOwnStructured(USERNAME, PASSWORD, { fromAccount, toAccount, amount, purpose, sign: !!sign })
+    const data = await transferOwnStructured(dbo().login, dbo().password, { fromAccount, toAccount, amount, purpose, sign: !!sign })
     invalidateCache()   // появился новый документ — список устарел
     res.json({ success: data.ok !== false, error: data.error || undefined, data })
   } catch (err) {
@@ -341,7 +387,7 @@ app.post('/api/transfer-own', async (req, res) => {
 // над документами. Только чтение.
 app.get('/api/documents', async (_, res) => {
   try {
-    const data = await cached('documents', CACHE_TTL_MS, () => getDocuments(USERNAME, PASSWORD))
+    const data = await cached('documents', CACHE_TTL_MS, () => getDocuments(dbo().login, dbo().password))
     res.json({ success: true, data })
   } catch (err) {
     console.error('[documents]', err.message)
@@ -353,7 +399,7 @@ app.get('/api/documents', async (_, res) => {
 // Шаг 1: отправить на подпись и получить серийник токена для окна ввода.
 app.post('/api/documents/:id/sign/start', async (req, res) => {
   try {
-    const data = await signStart(USERNAME, PASSWORD, { id: req.params.id })
+    const data = await signStart(dbo().login, dbo().password, { id: req.params.id })
     res.json({ success: true, data })
   } catch (err) {
     console.error('[sign start]', err.message)
@@ -366,7 +412,7 @@ app.post('/api/documents/:id/sign/start', async (req, res) => {
 // маршрут вернёт stage:'needKey' с серийником токена.
 app.get('/api/documents/:id/sign/status', async (req, res) => {
   try {
-    const data = await signStatus(USERNAME, PASSWORD, { id: req.params.id })
+    const data = await signStatus(dbo().login, dbo().password, { id: req.params.id })
     res.json({ success: data.stage !== 'error', data })
   } catch (err) {
     console.error('[sign status]', err.message)
@@ -379,7 +425,7 @@ app.get('/api/documents/:id/sign/status', async (req, res) => {
 app.post('/api/documents/:id/sign/sync', async (req, res) => {
   const { firstKey, secondKey } = req.body || {}
   try {
-    const data = await signSyncToken(USERNAME, PASSWORD, { id: req.params.id, firstKey, secondKey })
+    const data = await signSyncToken(dbo().login, dbo().password, { id: req.params.id, firstKey, secondKey })
     invalidateCache()
     res.json({ success: data.stage !== 'error', data })
   } catch (err) {
@@ -391,7 +437,7 @@ app.post('/api/documents/:id/sign/sync', async (req, res) => {
 // Отмена подписи: гасим висящую операцию в банке, если человек закрыл окно.
 app.post('/api/documents/:id/sign/cancel', async (req, res) => {
   try {
-    res.json({ success: true, data: await signCancel(USERNAME, PASSWORD, { id: req.params.id }) })
+    res.json({ success: true, data: await signCancel(dbo().login, dbo().password, { id: req.params.id }) })
   } catch (err) {
     res.status(400).json({ success: false, error: err.message })
   }
@@ -402,7 +448,7 @@ app.post('/api/documents/:id/sign/key', async (req, res) => {
   const { key } = req.body || {}
   if (!key) return res.status(400).json({ success: false, error: 'не передан ключ токена' })
   try {
-    const data = await signSubmitKey(USERNAME, PASSWORD, { id: req.params.id, key })
+    const data = await signSubmitKey(dbo().login, dbo().password, { id: req.params.id, key })
     invalidateCache()   // статус документа изменился
     res.json({ success: data.stage !== 'error', data })
   } catch (err) {
@@ -421,7 +467,7 @@ app.post('/api/documents/:id/action', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Недопустимое действие: ' + action })
   }
   try {
-    const data = await documentAction(USERNAME, PASSWORD, { id: req.params.id, action, confirm: !!confirm })
+    const data = await documentAction(dbo().login, dbo().password, { id: req.params.id, action, confirm: !!confirm })
     res.json({ success: data.ok, data })
   } catch (err) {
     console.error('[document action]', action, err.message)
@@ -434,7 +480,7 @@ app.post('/api/documents/:id/action', async (req, res) => {
 // Отдаёт сводку (эндпоинты, ключи-идентификаторы, действия), а не сами данные.
 app.get('/api/recon/documents', async (_, res) => {
   try {
-    const data = await reconDocuments(USERNAME, PASSWORD)
+    const data = await reconDocuments(dbo().login, dbo().password)
     res.json({ success: true, data })
   } catch (err) {
     console.error('[recon]', err.message)
@@ -445,7 +491,7 @@ app.get('/api/recon/documents', async (_, res) => {
 // Разведка REST-эндпоинтов: пробует варианты списка документов, отдаёт сырое.
 app.get('/api/recon/doc-model', async (req, res) => {
   try {
-    res.json({ success: true, data: await reconDocModel(USERNAME, PASSWORD, { id: req.query.id }) })
+    res.json({ success: true, data: await reconDocModel(dbo().login, dbo().password, { id: req.query.id }) })
   } catch (err) {
     res.status(500).json({ success: false, error: err.message })
   }
@@ -453,7 +499,7 @@ app.get('/api/recon/doc-model', async (req, res) => {
 
 app.get('/api/recon/rest', async (_, res) => {
   try {
-    const data = await reconRest(USERNAME, PASSWORD)
+    const data = await reconRest(dbo().login, dbo().password)
     res.json({ success: true, data })
   } catch (err) {
     console.error('[recon rest]', err.message)
@@ -464,7 +510,7 @@ app.get('/api/recon/rest', async (_, res) => {
 // Разведка формы перевода между своими счетами — только чтение полей.
 app.get('/api/recon/transfer', async (_, res) => {
   try {
-    const data = await reconTransferForm(USERNAME, PASSWORD)
+    const data = await reconTransferForm(dbo().login, dbo().password)
     res.json({ success: true, data })
   } catch (err) {
     console.error('[recon transfer]', err.message)
@@ -483,7 +529,7 @@ app.get('/api/sections', (_, res) => {
 // Данные конкретного раздела ДБО (кредиты, депозиты, эквайринг, АУСН и т.д.)
 app.get('/api/sections/:key', async (req, res) => {
   try {
-    const data = await getSectionData(USERNAME, PASSWORD, req.params.key)
+    const data = await getSectionData(dbo().login, dbo().password, req.params.key)
     res.json({ success: true, data })
   } catch (err) {
     console.error('[section]', req.params.key, err.message)
@@ -494,7 +540,7 @@ app.get('/api/sections/:key', async (req, res) => {
 
 app.get('/api/templates', async (req, res) => {
   try {
-    const data = await getTemplatesData(USERNAME, PASSWORD)
+    const data = await getTemplatesData(dbo().login, dbo().password)
     res.json({ success: true, data })
   } catch (err) {
     console.error('[templates]', err.message)
@@ -504,7 +550,7 @@ app.get('/api/templates', async (req, res) => {
 
 app.get('/api/payments-debug', async (req, res) => {
   try {
-    const data = await getPaymentsDebug(USERNAME, PASSWORD)
+    const data = await getPaymentsDebug(dbo().login, dbo().password)
     res.json({ success: true, data })
   } catch (err) {
     console.error('[payments-debug]', err.message)
@@ -514,7 +560,7 @@ app.get('/api/payments-debug', async (req, res) => {
 
 app.get('/api/nav-debug', async (req, res) => {
   try {
-    const data = await getNavDebug(USERNAME, PASSWORD)
+    const data = await getNavDebug(dbo().login, dbo().password)
     res.json({ success: true, data })
   } catch (err) {
     console.error('[nav-debug]', err.message)
@@ -528,7 +574,7 @@ app.get('/debug/api-responses', (req, res) => {
 
 app.get('/debug/accounts-dom', async (req, res) => {
   try {
-    const data = await getAccountsDomDebug(USERNAME, PASSWORD)
+    const data = await getAccountsDomDebug(dbo().login, dbo().password)
     res.json({ success: true, data })
   } catch (err) {
     res.status(500).json({ success: false, error: err.message })
@@ -538,7 +584,7 @@ app.get('/debug/accounts-dom', async (req, res) => {
 app.get('/api/statement', async (req, res) => {
   const { account = '', dateFrom, dateTo, format = 'pdf' } = req.query
   try {
-    const { buffer, filename, mimeType } = await downloadStatement(USERNAME, PASSWORD, { account, dateFrom, dateTo, format })
+    const { buffer, filename, mimeType } = await downloadStatement(dbo().login, dbo().password, { account, dateFrom, dateTo, format })
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`)
     res.setHeader('Content-Type', mimeType)
     res.setHeader('Content-Length', buffer.length)
@@ -550,7 +596,13 @@ app.get('/api/statement', async (req, res) => {
 })
 
 app.post('/api/logout', async (_, res) => {
+  // Выход обязан стирать пароль из памяти, а не только закрывать браузер:
+  // иначе после «выхода» сервис продолжал бы ходить в банк под владельцем.
+  liveSession = null
+  cachedWhoAmI = null
+  invalidateCache()
   await closeBrowser()
+  console.log('[auth] выход — пароль стёрт из памяти')
   res.json({ success: true })
 })
 
