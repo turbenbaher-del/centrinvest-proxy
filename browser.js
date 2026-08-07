@@ -2580,73 +2580,79 @@ async function signStart(username, password, { id }) {
   const forSign    = list.filter(x => x.signAuthorityTypeCode !== 'CONFIRM' || !x.signConfirm)
   if (!forSign.length) throw new Error('есть только подтверждающая подпись — подписать документ нечем')
 
-  const main = forSign.find(x => isEToken(x.typeName)) || forSign[0]
+  // У этого клиента средств подписи три: SmsCrypto, PayControl и eTokenPass,
+  // причём ПОДТВЕРЖДАЮЩАЯ — именно eToken. Отсюда и привычный владельцу
+  // порядок: сперва ключ с токена, потом подтверждение в PayControl.
+  // Основной подписью выбираем PayControl: подтверждение приходит на телефон,
+  // тогда как SmsCrypto потребовал бы ещё и код из СМС.
+  const main = forSign.find(x => isPayControl(x.typeName)) || forSign[0]
 
-  // Шаг подтверждения: если банк требует подтверждающую подпись (обычно
-  // PayControl на телефоне), она идёт ПЕРВОЙ и даёт confirmTransactionId.
   if (forConfirm.length) {
-    const confirmProfile = forConfirm.find(x => isPayControl(x.typeName)) || forConfirm[0]
+    const confirmProfile = forConfirm.find(x => isEToken(x.typeName)) || forConfirm[0]
     const cd = await prepareSignCall(p, { cryptoProfileId: confirmProfile.id, ids })
+    const serial = cd.result?.serialNumber || ''
     pendingSigns.set(String(id), {
-      stage: 'confirm',
+      stage: 'needKey',                    // подтверждающая подпись ключом с токена
+      confirmTransactionId: cd.transactionId,
       mainProfileId: main.id,
       mainTypeName: main.typeName,
-      confirmTransactionId: cd.transactionId,
-      pcOperationId: cd.result?.pcOperationId,
+      serial,
       startedAt: Date.now(),
     })
-    console.log('[sign] нужна подтверждающая подпись:', confirmProfile.typeName, '| txId:', cd.transactionId)
-    return {
-      stage: 'confirm',
-      confirmType: isPayControl(confirmProfile.typeName) ? 'payControl' : 'other',
-      message: isPayControl(confirmProfile.typeName)
-        ? 'Подтвердите операцию в приложении PayControl на телефоне'
-        : `Подтвердите операцию: ${confirmProfile.typeName}`,
-    }
+    console.log('[sign] подтверждающая подпись:', confirmProfile.typeName, '| серийник:', serial)
+    return { stage: 'needKey', serial, attempts: cd.result?.cryptoParamsModel?.maxAttempts }
   }
 
+  // Подтверждающей подписи нет — сразу основная.
   return signPrepareMain(p, id, main, undefined)
 }
 
-// Основная подпись: prepareSign по выбранному средству, отдаём серийник токена.
+// Основная подпись. Для PayControl подтверждение приходит в приложение на
+// телефоне, поэтому дальше клиента опрашиваем через signStatus.
 async function signPrepareMain(p, id, main, confirmTransactionId) {
   const d = await prepareSignCall(p, {
     cryptoProfileId: main.id,
     ids: [String(id)],
     confirmTransactionId,
   })
-  const serial = d.result?.serialNumber || d.serialNumber || ''
+  const viaPayControl = isPayControl(main.typeName)
   pendingSigns.set(String(id), {
-    stage: 'needKey',
+    stage: viaPayControl ? 'payControl' : 'needKey',
     transactionId: d.transactionId,
     confirmTransactionId,
-    serial,
-    attempts: d.result?.cryptoParamsModel?.maxAttempts,
+    serial: d.result?.serialNumber || '',
     startedAt: Date.now(),
   })
-  console.log('[sign] prepareSign ок, серийник:', serial, '| попыток:', d.result?.cryptoParamsModel?.maxAttempts)
-  return { stage: 'needKey', serial, attempts: d.result?.cryptoParamsModel?.maxAttempts }
+  console.log('[sign] основная подпись:', main.typeName, '| txId:', d.transactionId)
+  if (viaPayControl) {
+    return { stage: 'confirm', confirmType: 'payControl',
+      message: 'Подтвердите операцию в приложении PayControl на телефоне' }
+  }
+  return { stage: 'needKey', serial: d.result?.serialNumber || '',
+    attempts: d.result?.cryptoParamsModel?.maxAttempts }
 }
 
-// Опрос подтверждения PayControl: пока клиент не нажал в приложении — ждём.
+// Опрос подтверждения в PayControl. Пока клиент не нажал в приложении —
+// банк держит подпись неподтверждённой.
 async function signStatus(username, password, { id }) {
   const pend = pendingSigns.get(String(id))
   if (!pend) throw new Error('подпись не начата или истекла — начните заново')
-  if (pend.stage !== 'confirm') return { stage: pend.stage, serial: pend.serial }
+  if (pend.stage !== 'payControl') {
+    return { stage: pend.stage === 'needKey' ? 'needKey' : pend.stage, serial: pend.serial }
+  }
 
   const p = await ensureLoggedIn(username, password)
   const r = await bankApi(p, 'GET',
-    `/api/v1/${PAYCONTROL_MODULE}/signresult?transactionId=${encodeURIComponent(pend.confirmTransactionId)}`, null)
+    `/api/v1/${PAYCONTROL_MODULE}/signresult?transactionId=${encodeURIComponent(pend.transactionId)}`, null)
   const d = r.json?.data || r.json
   console.log('[sign] статус PayControl:', JSON.stringify(d).slice(0, 200))
 
   if (signResultsOk(d)) {
-    // Подтверждение получено — переходим к основной подписи ключом с токена.
-    const list = await getCryptoProfiles(p, [String(id)])
-    const main = list.find(x => x.id === pend.mainProfileId)
-      || list.find(x => isEToken(x.typeName))
-    if (!main) throw new Error('средство основной подписи пропало из списка')
-    return signPrepareMain(p, id, main, pend.confirmTransactionId)
+    pendingSigns.delete(String(id))
+    const sent = await sendDocument(p, id, pend.confirmTransactionId)
+    return sent.ok
+      ? { stage: 'done', message: 'Документ подписан и отправлен в банк' }
+      : { stage: 'signed', message: 'Документ подписан, но не отправлен: ' + sent.error }
   }
 
   const failed = (d?.signResults || []).some(s => s.result && s.result !== SIGN_OK)
@@ -2654,7 +2660,7 @@ async function signStatus(username, password, { id }) {
     pendingSigns.delete(String(id))
     return { stage: 'error', errors: [d?.outputMessages?.[0]?.message || 'подтверждение отклонено'] }
   }
-  return { stage: 'confirm', message: 'Ждём подтверждения в PayControl' }
+  return { stage: 'confirm', confirmType: 'payControl', message: 'Ждём подтверждения в PayControl' }
 }
 
 async function signSubmitKey(username, password, { id, key }) {
@@ -2664,9 +2670,12 @@ async function signSubmitKey(username, password, { id, key }) {
   if (!pend || pend.stage !== 'needKey') throw new Error('подпись не начата или истекла — начните заново')
   const p = await ensureLoggedIn(username, password)
 
+  // Ключом закрывается ТА транзакция, которая сейчас ждёт кода: обычно это
+  // подтверждающая подпись eToken, а при её отсутствии — основная.
+  const txId = pend.confirmTransactionId || pend.transactionId
   const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/continueSign`, {
     model: { code: String(key) },
-    transactionId: pend.transactionId,
+    transactionId: txId,
   })
   const d = r.json?.data || r.json
   console.log('[sign] continueSign ответ:', JSON.stringify(d).slice(0, 400))
@@ -2678,8 +2687,15 @@ async function signSubmitKey(username, password, { id, key }) {
     return { stage: 'error', errors: [msg] }
   }
 
-  // Документ подписан. Теперь ОТПРАВКА — отдельный шаг, без него документ
-  // остаётся у клиента и в банк не уходит.
+  // Ключ приняли. Если это была подтверждающая подпись — переходим к основной
+  // (PayControl), и только после неё документ уходит в банк.
+  if (pend.mainProfileId) {
+    const list = await getCryptoProfiles(p, [String(id)])
+    const main = list.find(x => x.id === pend.mainProfileId) || list.find(x => isPayControl(x.typeName))
+    if (!main) throw new Error('средство основной подписи пропало из списка')
+    return signPrepareMain(p, id, main, pend.confirmTransactionId)
+  }
+
   pendingSigns.delete(String(id))
   const sent = await sendDocument(p, id, pend.confirmTransactionId)
   return sent.ok
