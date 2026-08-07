@@ -92,6 +92,44 @@ app.use((req, res, next) => {
   })
 })
 
+// ─── Кэш ответов ────────────────────────────────────────────────────────────
+// Каждый поход в банк — это браузер, навигация и отрисовка SPA: 30–90 секунд.
+// Сам банк отвечает мгновенно, потому что у него настоящий API, а мы ходим
+// «как человек». Держим свежие ответы минуту: повторные открытия экранов
+// становятся мгновенными, а нагрузка на банк падает.
+const responseCache = new Map()
+const CACHE_TTL_MS = 60 * 1000
+
+/** Отдать из кэша или посчитать и запомнить. Ошибки не кэшируем. */
+async function cached(key, ttlMs, producer) {
+  const hit = responseCache.get(key)
+  if (hit && Date.now() - hit.at < ttlMs) {
+    console.log(`[cache] ${key}: отдано из кэша (${Math.round((Date.now() - hit.at) / 1000)} c назад)`)
+    return hit.value
+  }
+  // Если такой запрос уже выполняется — ждём его, а не запускаем второй
+  if (hit?.pending) {
+    console.log(`[cache] ${key}: жду уже идущий запрос`)
+    return hit.pending
+  }
+  const pending = producer()
+  responseCache.set(key, { pending, at: 0 })
+  try {
+    const value = await pending
+    responseCache.set(key, { value, at: Date.now() })
+    return value
+  } catch (e) {
+    responseCache.delete(key)
+    throw e
+  }
+}
+
+/** Сбросить кэш после операций, меняющих данные в банке. */
+function invalidateCache() {
+  responseCache.clear()
+  console.log('[cache] сброшен')
+}
+
 app.post('/api/login', async (req, res) => {
   const { login, password } = req.body || {}
   if (login !== USERNAME || password !== PASSWORD) {
@@ -113,16 +151,18 @@ let cachedOwnAccounts = null
 
 app.get('/api/accounts', async (req, res) => {
   try {
-    const data = await getAccountsData(USERNAME, PASSWORD)
+    // Кэшируем оба захода в банк разом: страницу счетов и форму платежа
+    const { data, own } = await cached('accounts', CACHE_TTL_MS, async () => {
+      const pageAccounts = await getAccountsData(USERNAME, PASSWORD)
+      let names = []
+      try {
+        names = await getAccountNames(USERNAME, PASSWORD)
+      } catch (e) {
+        console.warn('[accounts] список счетов из формы недоступен:', e.message)
+      }
+      return { data: pageAccounts, own: names }
+    })
     const seizure = data.find(a => a.seizureNotice)
-
-    // Пытаемся получить достоверный список своих счетов из формы платежа
-    let own = []
-    try {
-      own = await getAccountNames(USERNAME, PASSWORD)
-    } catch (e) {
-      console.warn('[accounts] список счетов из формы недоступен:', e.message)
-    }
 
     if (own.length > 0) {
       cachedOwnAccounts = own.map(a => ({
@@ -158,7 +198,7 @@ app.get('/api/accounts', async (req, res) => {
 
 app.get('/api/payments', async (req, res) => {
   try {
-    const data = await getPaymentsData(USERNAME, PASSWORD)
+    const data = await cached('payments', CACHE_TTL_MS, () => getPaymentsData(USERNAME, PASSWORD))
     res.json({ success: true, data })
   } catch (err) {
     console.error('[payments]', err.message)
@@ -271,6 +311,7 @@ app.post('/api/transfer-own', async (req, res) => {
     // Структурный API вместо кликов по форме: счета выбираются по идентификатору,
     // поэтому не бывает «счёт получателя не выбран». success = реальный итог банка.
     const data = await transferOwnStructured(USERNAME, PASSWORD, { fromAccount, toAccount, amount, purpose, sign: !!sign })
+    invalidateCache()   // появился новый документ — список устарел
     res.json({ success: data.ok !== false, error: data.error || undefined, data })
   } catch (err) {
     console.error('[transfer-own]', err.message)
@@ -284,7 +325,7 @@ app.post('/api/transfer-own', async (req, res) => {
 // над документами. Только чтение.
 app.get('/api/documents', async (_, res) => {
   try {
-    const data = await getDocuments(USERNAME, PASSWORD)
+    const data = await cached('documents', CACHE_TTL_MS, () => getDocuments(USERNAME, PASSWORD))
     res.json({ success: true, data })
   } catch (err) {
     console.error('[documents]', err.message)
@@ -310,6 +351,7 @@ app.post('/api/documents/:id/sign/key', async (req, res) => {
   if (!key) return res.status(400).json({ success: false, error: 'не передан ключ токена' })
   try {
     const data = await signSubmitKey(USERNAME, PASSWORD, { id: req.params.id, key })
+    invalidateCache()   // статус документа изменился
     res.json({ success: data.stage !== 'error', data })
   } catch (err) {
     console.error('[sign key]', err.message)
