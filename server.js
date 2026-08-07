@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, reconTransferForm, transferOwnStructured, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser } = require('./browser')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -130,18 +130,34 @@ function invalidateCache() {
   console.log('[cache] сброшен')
 }
 
+// Имя клиента меняется раз в никогда — держим его в памяти, чтобы вход
+// не ждал полного захода в банк.
+let cachedWhoAmI = null
+let whoAmIWarming = false
+
 app.post('/api/login', async (req, res) => {
   const { login, password } = req.body || {}
   if (login !== USERNAME || password !== PASSWORD) {
     return res.status(401).json({ success: false, error: 'Неверные учетные данные' })
   }
-  try {
-    const name = await getWhoAmI(USERNAME, PASSWORD)
-    res.json({ success: true, name: name || login })
-  } catch (err) {
-    console.error('[login]', err.message)
-    res.status(500).json({ success: false, error: err.message })
+  // Вход отвечает СРАЗУ. Раньше здесь ждали getWhoAmI — полный заход в банк
+  // на 40-90 c; на телефоне сервис-воркер обрывал запрос по таймауту и человек
+  // видел «Failed to fetch» вместо входа. Имя банка не нужно для входа: пароль
+  // уже проверен, а сессию прогреваем фоном, чтобы первый экран открылся быстро.
+  res.json({ success: true, name: cachedWhoAmI || login })
+
+  if (!cachedWhoAmI && !whoAmIWarming) {
+    whoAmIWarming = true
+    getWhoAmI(USERNAME, PASSWORD)
+      .then(name => { if (name) { cachedWhoAmI = name; console.log('[login] имя клиента:', name) } })
+      .catch(err => console.error('[login] прогрев не удался:', err.message))
+      .finally(() => { whoAmIWarming = false })
   }
+})
+
+// Имя клиента отдельным запросом — приложение подтягивает его, когда придёт.
+app.get('/api/whoami', (_, res) => {
+  res.json({ success: true, name: cachedWhoAmI })
 })
 
 // Последний удачный список СВОИХ счетов (из формы платежа) — источник истины.
@@ -345,6 +361,19 @@ app.post('/api/documents/:id/sign/start', async (req, res) => {
   }
 })
 
+// Шаг 1.5: опрос подтверждения в PayControl. Пока клиент не нажал в приложении
+// на телефоне — банк держит подпись неподтверждённой. Как подтвердит, этот же
+// маршрут вернёт stage:'needKey' с серийником токена.
+app.get('/api/documents/:id/sign/status', async (req, res) => {
+  try {
+    const data = await signStatus(USERNAME, PASSWORD, { id: req.params.id })
+    res.json({ success: data.stage !== 'error', data })
+  } catch (err) {
+    console.error('[sign status]', err.message)
+    res.status(400).json({ success: false, error: err.message })
+  }
+})
+
 // Шаг 2: пользователь ввёл ключ с токена — отправляем и ждём PayControl.
 app.post('/api/documents/:id/sign/key', async (req, res) => {
   const { key } = req.body || {}
@@ -391,6 +420,14 @@ app.get('/api/recon/documents', async (_, res) => {
 })
 
 // Разведка REST-эндпоинтов: пробует варианты списка документов, отдаёт сырое.
+app.get('/api/recon/doc-model', async (req, res) => {
+  try {
+    res.json({ success: true, data: await reconDocModel(USERNAME, PASSWORD, { id: req.query.id }) })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
 app.get('/api/recon/rest', async (_, res) => {
   try {
     const data = await reconRest(USERNAME, PASSWORD)

@@ -2193,12 +2193,16 @@ async function getDocuments(username, password) {
         documents.push({
           id,
           number:    String(pick(node, 'docNumber', 'number')).trim(),
+          date:      String(pick(node, 'date', 'docDate', 'documentDate')).trim(),
           account:   String(pick(node, 'payerAccount', 'account', 'accountNumber')).replace(/\D/g, ''),
           recipient: String(pick(node, 'receiverName', 'receiver', 'correspondentName', 'payeeName')).trim(),
           purpose:   String(pick(node, 'paymentPurpose', 'purpose', 'description')).trim(),
-          // Документы этих форм — исходящие, поэтому сумма со знаком минус
-          amount:   -Math.abs(toAmount(pick(node, 'documentSum', 'sum', 'amount'))),
-          direction: 'out',
+          // Сумма: у вкладок «Платежи» поле называется summ, у массовых — documentSum.
+          // Без summ суммы терялись и весь список приходил с нулями.
+          // Знак берём из operationType: CREDIT — поступление, остальное — списание.
+          amount:   (String(pick(node, 'operationType')).toUpperCase() === 'CREDIT' ? 1 : -1)
+                    * Math.abs(toAmount(pick(node, 'summ', 'documentSum', 'sum', 'amount'))),
+          direction: String(pick(node, 'operationType')).toUpperCase() === 'CREDIT' ? 'in' : 'out',
           status:    String(pick(node, 'stateName', 'state', 'statusName')).trim() || 'НЕИЗВЕСТЕН',
           stateCode: String(pick(node, 'stateCode', 'statusCode')).trim(),
           actions:   Array.isArray(node.actions) ? node.actions : Object.keys(node.actions || {}),
@@ -2416,6 +2420,18 @@ async function transferOwnStructured(username, password, { fromAccount, toAccoun
 }
 
 /**
+ * Разведка модели документа: GET {module}/{id} отдаёт документ целиком.
+ * Нужна, чтобы собрать создание платежа чистым REST (POST {module}),
+ * как это делает фронт банка (useCreateOrEditDoc), а не кликами по форме.
+ * Только чтение.
+ */
+async function reconDocModel(username, password, { id }) {
+  const p = await ensureLoggedIn(username, password)
+  const r = await bankApi(p, 'GET', `/api/v1/${SIGN_MODULE}/${encodeURIComponent(id)}`, null)
+  return { status: r.status, model: r.json }
+}
+
+/**
  * Разведка формы перевода между своими счетами (r030accounts).
  * Только открывает форму и возвращает её поля — чтобы реализовать перевод
  * по структурному API с верными именами полей, а не кликами. Ничего не сохраняет.
@@ -2480,71 +2496,187 @@ async function reconTransferForm(username, password) {
 }
 
 /** Шаг 1: отправить документ на подпись и дойти до окна ввода ключа eToken. */
-async function signStart(username, password, { id }) {
-  // ЧИСТЫЙ REST-протокол подписи из исходников фронта банка (bss-front-d2sme):
-  // POST {module}/prepareSign {cryptoProfileId, ids:[docId]} -> transactionId + serial.
-  // Никаких кликов, модалок и вкладок — прямой вызов API через сессионный токен.
-  if (!id) throw new Error('не передан id документа')
-  const p = await ensureLoggedIn(username, password)
+// Сценарий подписи ровно как во фронте банка (bss-front-d2sme, useSignAndSend):
+//   контроли -> сохранение -> ПОДПИСЬ -> ОТПРАВКА.
+// Подпись, в свою очередь (useSignWithConfirmation):
+//   1) getUserCryptoProfiles — какие средства подписи есть у пользователя;
+//   2) если среди них есть ПОДТВЕРЖДАЮЩИЕ (signAuthorityTypeCode === 'CONFIRM'
+//      и signConfirm) — сперва подписываем ими и получаем confirmTransactionId;
+//   3) затем основная подпись (eToken PASS) уже с этим confirmTransactionId;
+//   4) отдельным шагом POST {module}/send — без него документ остаётся
+//      подписанным, но в банк не уходит.
+const SIGN_MODULE = 'doc/rur/payorders'   // рублёвые платёжки
+const PAYCONTROL_MODULE = 'client/paycontrol'
+const SIGN_OK = 'OK'                      // successSignResult из utils/sign.js
 
-  const MODULE = 'doc/rur/payorders'   // рублёвые платёжки
+// Название типа средства подписи у банка человекочитаемое: 'SmsCrypto',
+// 'устройство eTokenPass', 'приложение PayControl' и т.п.
+const isEToken    = t => /etoken.?pass/i.test(t || '')
+const isPayControl = t => /paycontrol/i.test(t || '')
 
-  // 1) Профили подписи пользователя для этого документа
-  let r = await bankApi(p, 'POST', `/api/v1/${MODULE}/getUserCryptoProfiles`, { ids: [String(id)] })
-  const profilesRaw = r.json?.result || r.json?.data?.result || r.json?.profiles || r.json?.data || r.json
-  const list = Array.isArray(profilesRaw) ? profilesRaw : (profilesRaw?.items || profilesRaw?.cryptoProfiles || [])
-  console.log('[sign] профили подписи:', JSON.stringify(list).slice(0, 300))
-  const eTokenProfile = list.find(x => /etoken.?pass/i.test(x.typeName || x.type || '')) || list[0]
-  if (!eTokenProfile) throw new Error('банк не вернул профилей подписи для документа')
+async function getCryptoProfiles(p, ids) {
+  const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/getUserCryptoProfiles`, { ids })
+  const list = r.json?.cryptoProfiles || r.json?.data?.cryptoProfiles || []
+  console.log('[sign] средства подписи:', list.map(x =>
+    `${x.typeName}${x.signAuthorityTypeCode === 'CONFIRM' && x.signConfirm ? ' (подтверждающая)' : ''}`).join(', ') || '—')
+  return list
+}
 
-  // 2) prepareSign — банк готовит подпись и возвращает серийник токена
-  r = await bankApi(p, 'POST', `/api/v1/${MODULE}/prepareSign`, {
-    cryptoProfileId: eTokenProfile.id,
-    ids: [String(id)],
+async function prepareSignCall(p, { cryptoProfileId, ids, confirmTransactionId }) {
+  const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/prepareSign`, {
+    cryptoProfileId, ids, confirmTransactionId,
   })
   const d = r.json?.data || r.json
-  console.log('[sign] prepareSign ответ:', JSON.stringify(d).slice(0, 400))
   if (!d?.transactionId) {
-    const msg = d?.outputMessages?.[0]?.message || d?.result?.errorMessage || 'банк не начал подпись'
-    throw new Error(msg)
+    throw new Error(d?.outputMessages?.[0]?.message || d?.result?.errorMessage || 'банк не начал подпись')
   }
   if (d.result?.hasErrors) throw new Error(d.result.errorMessage || 'ошибка подготовки подписи')
+  return d
+}
 
+// Итог подписи считается успешным, только если КАЖДЫЙ результат равен 'OK'
+// (checkSignResults во фронте банка). Раньше здесь была слишком мягкая проверка,
+// из-за неё неуспешная подпись выглядела успешной.
+const signResultsOk = d => {
+  const rs = d?.signResults || d?.result?.signResults
+  return Array.isArray(rs) && rs.length > 0 && rs.every(s => s.result === SIGN_OK)
+}
+
+async function signStart(username, password, { id }) {
+  if (!id) throw new Error('не передан id документа')
+  const p = await ensureLoggedIn(username, password)
+  const ids = [String(id)]
+
+  const list = await getCryptoProfiles(p, ids)
+  if (!list.length) throw new Error('у пользователя нет прав подписи этого документа')
+
+  const forConfirm = list.filter(x => x.signAuthorityTypeCode === 'CONFIRM' && x.signConfirm)
+  const forSign    = list.filter(x => x.signAuthorityTypeCode !== 'CONFIRM' || !x.signConfirm)
+  if (!forSign.length) throw new Error('есть только подтверждающая подпись — подписать документ нечем')
+
+  const main = forSign.find(x => isEToken(x.typeName)) || forSign[0]
+
+  // Шаг подтверждения: если банк требует подтверждающую подпись (обычно
+  // PayControl на телефоне), она идёт ПЕРВОЙ и даёт confirmTransactionId.
+  if (forConfirm.length) {
+    const confirmProfile = forConfirm.find(x => isPayControl(x.typeName)) || forConfirm[0]
+    const cd = await prepareSignCall(p, { cryptoProfileId: confirmProfile.id, ids })
+    pendingSigns.set(String(id), {
+      stage: 'confirm',
+      mainProfileId: main.id,
+      mainTypeName: main.typeName,
+      confirmTransactionId: cd.transactionId,
+      pcOperationId: cd.result?.pcOperationId,
+      startedAt: Date.now(),
+    })
+    console.log('[sign] нужна подтверждающая подпись:', confirmProfile.typeName, '| txId:', cd.transactionId)
+    return {
+      stage: 'confirm',
+      confirmType: isPayControl(confirmProfile.typeName) ? 'payControl' : 'other',
+      message: isPayControl(confirmProfile.typeName)
+        ? 'Подтвердите операцию в приложении PayControl на телефоне'
+        : `Подтвердите операцию: ${confirmProfile.typeName}`,
+    }
+  }
+
+  return signPrepareMain(p, id, main, undefined)
+}
+
+// Основная подпись: prepareSign по выбранному средству, отдаём серийник токена.
+async function signPrepareMain(p, id, main, confirmTransactionId) {
+  const d = await prepareSignCall(p, {
+    cryptoProfileId: main.id,
+    ids: [String(id)],
+    confirmTransactionId,
+  })
   const serial = d.result?.serialNumber || d.serialNumber || ''
   pendingSigns.set(String(id), {
-    module: MODULE,
+    stage: 'needKey',
     transactionId: d.transactionId,
+    confirmTransactionId,
     serial,
+    attempts: d.result?.cryptoParamsModel?.maxAttempts,
     startedAt: Date.now(),
   })
-  console.log('[sign] prepareSign ок, серийник:', serial, '| txId:', d.transactionId)
-  return { stage: 'needKey', serial }
+  console.log('[sign] prepareSign ок, серийник:', serial, '| попыток:', d.result?.cryptoParamsModel?.maxAttempts)
+  return { stage: 'needKey', serial, attempts: d.result?.cryptoParamsModel?.maxAttempts }
+}
+
+// Опрос подтверждения PayControl: пока клиент не нажал в приложении — ждём.
+async function signStatus(username, password, { id }) {
+  const pend = pendingSigns.get(String(id))
+  if (!pend) throw new Error('подпись не начата или истекла — начните заново')
+  if (pend.stage !== 'confirm') return { stage: pend.stage, serial: pend.serial }
+
+  const p = await ensureLoggedIn(username, password)
+  const r = await bankApi(p, 'GET',
+    `/api/v1/${PAYCONTROL_MODULE}/signresult?transactionId=${encodeURIComponent(pend.confirmTransactionId)}`, null)
+  const d = r.json?.data || r.json
+  console.log('[sign] статус PayControl:', JSON.stringify(d).slice(0, 200))
+
+  if (signResultsOk(d)) {
+    // Подтверждение получено — переходим к основной подписи ключом с токена.
+    const list = await getCryptoProfiles(p, [String(id)])
+    const main = list.find(x => x.id === pend.mainProfileId)
+      || list.find(x => isEToken(x.typeName))
+    if (!main) throw new Error('средство основной подписи пропало из списка')
+    return signPrepareMain(p, id, main, pend.confirmTransactionId)
+  }
+
+  const failed = (d?.signResults || []).some(s => s.result && s.result !== SIGN_OK)
+  if (failed) {
+    pendingSigns.delete(String(id))
+    return { stage: 'error', errors: [d?.outputMessages?.[0]?.message || 'подтверждение отклонено'] }
+  }
+  return { stage: 'confirm', message: 'Ждём подтверждения в PayControl' }
 }
 
 async function signSubmitKey(username, password, { id, key }) {
   // continueSign {model:{code}, transactionId} — ключ токена идёт в model.code
   if (!key) throw new Error('не передан ключ токена')
   const pend = pendingSigns.get(String(id))
-  if (!pend) throw new Error('подпись не начата или истекла — начните заново')
+  if (!pend || pend.stage !== 'needKey') throw new Error('подпись не начата или истекла — начните заново')
   const p = await ensureLoggedIn(username, password)
 
-  const r = await bankApi(p, 'POST', `/api/v1/${pend.module}/continueSign`, {
+  const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/continueSign`, {
     model: { code: String(key) },
     transactionId: pend.transactionId,
   })
   const d = r.json?.data || r.json
   console.log('[sign] continueSign ответ:', JSON.stringify(d).slice(0, 400))
 
-  const signResults = d?.signResults || d?.result?.signResults
-  const ok = Array.isArray(signResults)
-    ? signResults.every(s => s.result || s.signed || !s.hasErrors)
-    : !!d?.result
-  if (ok) {
-    pendingSigns.delete(String(id))
-    return { stage: 'done', message: 'Документ подписан' }
+  if (!signResultsOk(d)) {
+    const msg = d?.outputMessages?.[0]?.message
+      || (d?.signResults || []).map(s => s.message).filter(Boolean)[0]
+      || 'ключ не принят'
+    return { stage: 'error', errors: [msg] }
   }
-  const msg = d?.outputMessages?.[0]?.message || d?.result?.errorMessage || 'ключ не принят'
-  return { stage: 'error', errors: [msg] }
+
+  // Документ подписан. Теперь ОТПРАВКА — отдельный шаг, без него документ
+  // остаётся у клиента и в банк не уходит.
+  pendingSigns.delete(String(id))
+  const sent = await sendDocument(p, id, pend.confirmTransactionId)
+  return sent.ok
+    ? { stage: 'done', message: 'Документ подписан и отправлен в банк' }
+    : { stage: 'signed', message: 'Документ подписан, но не отправлен: ' + sent.error }
+}
+
+// POST {module}/send {ids, confirmTransactionId, userWorkspace}
+async function sendDocument(p, id, confirmTransactionId) {
+  try {
+    const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/send`, {
+      ids: [String(id)],
+      confirmTransactionId,
+      userWorkspace: {},
+    })
+    const d = r.json?.data || r.json
+    console.log('[sign] send ответ:', JSON.stringify(d).slice(0, 300))
+    const results = d?.results || []
+    if (results.some(e => e.result === 'success')) return { ok: true }
+    return { ok: false, error: results[0]?.message || 'банк не принял отправку' }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
 }
 
 
@@ -2705,4 +2837,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, reconTransferForm, transferOwnStructured, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser }
