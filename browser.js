@@ -2536,6 +2536,37 @@ async function signSubmitKey(username, password, { id, key }) {
  * ТОЛЬКО ЧТЕНИЕ: переходим по разделам документов и записываем трафик /api/v1.
  * Кнопки подписи, отправки и удаления не нажимаются — деньги не двигаются.
  */
+// Разведка REST-эндпоинтов банка: пробуем варианты и возвращаем сырые ответы,
+// чтобы узнать точный адрес списка документов и профилей подписи без гадания.
+async function reconRest(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  await waitForAppReady(p, 30000)
+  const probes = [
+    ['GET', '/api/v1/doc/rur/payorders?_offset=0&_limit=5'],
+    ['GET', '/api/v1/doc/rur/payorders/list?_offset=0&_limit=5'],
+    ['GET', '/api/v1/doc/rur/payorders?_offset=0&_limit=5&_columns=id,docNumber,stateName,documentSum'],
+    ['POST', '/api/v1/doc/rur/payorders/list', { offset: 0, limit: 5 }],
+    ['GET', '/api/v1/doc/rur/payorders/count'],
+  ]
+  const out = []
+  for (const [method, path, body] of probes) {
+    try {
+      const r = await bankApi(p, method, path, body || null)
+      const j = r.json
+      const arr = Array.isArray(j) ? j : (j?.items || j?.data || j?.list || j?.rows)
+      out.push({
+        method, path, status: r.status,
+        тип: Array.isArray(arr) ? `массив(${arr.length})` : typeof j,
+        поля: Array.isArray(arr) && arr[0] ? Object.keys(arr[0]) : Object.keys(j || {}),
+        образец: JSON.stringify(Array.isArray(arr) ? arr[0] : j).slice(0, 500),
+      })
+    } catch (e) {
+      out.push({ method, path, error: e.message })
+    }
+  }
+  return out
+}
+
 async function reconDocuments(username, password) {
   const p = await ensureLoggedIn(username, password)
   const traffic = []
@@ -2653,4 +2684,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, reconTransferForm, transferOwnStructured, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signSubmitKey, reconTransferForm, transferOwnStructured, closeBrowser }
