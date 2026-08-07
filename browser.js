@@ -1964,6 +1964,23 @@ async function getAccountNames(username, password) {
  *
  * Только чтение: переходы по вкладкам статусов, никаких действий над документами.
  */
+// Коды статусов документа из REST payorders/list → русские названия ДБО
+const DOC_STATE_NAMES = {
+  new: 'Создан',
+  signed: 'Подписан',
+  partlySigned: 'Частично подписан',
+  processed: 'Исполнен',
+  inProcess: 'В обработке',
+  delivered: 'Доставлен',
+  accepted: 'Принят',
+  declinedByBank: 'Отклонён банком',
+  declinedByABS: 'Отменён банком',
+  invalidSign: 'Ошибка подписи',
+  invalidProps: 'Ошибка реквизитов',
+  invalid: 'Ошибка контроля',
+  rejected: 'Отклонён',
+}
+
 const PAYMENT_FORMS = {
   'ui/payments/draft':         { status: 'ЧЕРНОВИК',    tab: 'Черновики' },
   'ui/payments/partlySigned':  { status: 'НА ПОДПИСЬ',  tab: 'На подпись' },
@@ -2016,8 +2033,9 @@ async function getDocuments(username, password) {
         purpose: String(it.purpose ?? '').trim(),
         amount: -Math.abs(toAmount(it.sum)),
         direction: 'out',
-        // Статус документа — в поле state; showForSign отмечает «под подпись»
-        status: String(it.state ?? '').trim() || 'НЕИЗВЕСТЕН',
+        // Статус — код в поле state; переводим в понятное название.
+        // showForSign отмечает документы, ожидающие подписи.
+        status: DOC_STATE_NAMES[String(it.state ?? '')] || String(it.state ?? '').trim() || 'НЕИЗВЕСТЕН',
         stateCode: String(it.stateCode ?? '').trim(),
         showForSign: !!it.showForSign,
         showInProcess: !!it.showInProcess,
