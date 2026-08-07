@@ -2286,17 +2286,15 @@ async function documentAction(username, password, { id, action, confirm = false 
   }
 }
 
-// ─── Подпись документа с вводом ключа eToken ──────────────────────────────────
-// Двухшаговый интерактивный поток, пойманный на живой операции 31.07.2026:
-//   1) _saveAndSign по документу → банк просит выбрать средство подписи
-//      (cryptoProfileSelect) → форма ввода ключа eToken PASS с серийным номером;
-//   2) пользователь вводит ключ с аппаратного токена → eTokenPassSign/doAction →
-//      подтверждение в PayControl на телефоне (банк опрашивает статус).
-//
-// Между шагами держим состояние: та же сессия playwright и instanceToken'ы форм.
+// ─── Подпись документа (чистый REST API) ──────────────────────────────────────
+// Раньше здесь был хрупкий поток через эмуляцию кликов (doAction+stateUpdate по
+// формам ZK). Из исходников фронта банка (bss-front-d2sme) вскрылся настоящий
+// REST API подписи — signStart/signSubmitKey ниже используют именно его:
+//   POST doc/rur/payorders/prepareSign  → transactionId + серийник токена
+//   POST doc/rur/payorders/continueSign → ключ в model.code
 // Ключ и подтверждение — только у владельца, подписать за него нельзя by design.
 
-const pendingSigns = new Map()  // id документа → { serial, tokens, startedAt }
+const pendingSigns = new Map()  // id документа → { module, transactionId, serial }
 
 // Ищем в ответе банка форму по фрагменту имени и возвращаем её токен и поля
 function findForm(res, namePattern) {
@@ -2467,214 +2465,72 @@ async function reconTransferForm(username, password) {
 
 /** Шаг 1: отправить документ на подпись и дойти до окна ввода ключа eToken. */
 async function signStart(username, password, { id }) {
+  // ЧИСТЫЙ REST-протокол подписи из исходников фронта банка (bss-front-d2sme):
+  // POST {module}/prepareSign {cryptoProfileId, ids:[docId]} -> transactionId + serial.
+  // Никаких кликов, модалок и вкладок — прямой вызов API через сессионный токен.
   if (!id) throw new Error('не передан id документа')
-
   const p = await ensureLoggedIn(username, password)
 
-  // Сброс состояния: незакрытый диалог от прошлой попытки блокирует клики
-  // по вкладкам, и документ «не находится».
-  try {
-    await p.goto('https://dbo.centrinvest.ru/api-ui/', { waitUntil: 'commit', timeout: 30000 })
-  } catch {}
+  const MODULE = 'doc/rur/payorders'   // рублёвые платёжки
 
-  const ready = await waitForAppReady(p, 45000)
-  if (!ready) throw new Error('Интерфейс ДБО не загрузился')
+  // 1) Профили подписи пользователя для этого документа
+  let r = await bankApi(p, 'POST', `/api/v1/${MODULE}/getUserCryptoProfiles`, { ids: [String(id)] })
+  const profilesRaw = r.json?.result || r.json?.data?.result || r.json?.profiles || r.json?.data || r.json
+  const list = Array.isArray(profilesRaw) ? profilesRaw : (profilesRaw?.items || profilesRaw?.cryptoProfiles || [])
+  console.log('[sign] профили подписи:', JSON.stringify(list).slice(0, 300))
+  const eTokenProfile = list.find(x => /etoken.?pass/i.test(x.typeName || x.type || '')) || list[0]
+  if (!eTokenProfile) throw new Error('банк не вернул профилей подписи для документа')
 
-  // Находим форму с документом. menu/click отдаёт ту вкладку, что открыта
-  // сейчас (обычно «Выполненные»), поэтому проходим по вкладкам статусов —
-  // тем же приёмом, что уже работает в getDocuments.
-  let target = null
-  const tabs = [
-    { key: 'draft', label: 'Черновики' },
-    { key: 'partlySigned', label: 'На подпись' },
-  ]
-
-  const dismiss = async () => {
-    try {
-      await p.evaluate(() => {
-        const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
-        if (m) { const bs = [...m.querySelectorAll('button,[role=button]')]; const b = bs[bs.length - 1]; if (b) b.click(); else m.remove() }
-      })
-    } catch {}
-  }
-
-  // Слушаем ответы банка, пока кликаем по вкладкам — из них достаём форму
-  const captured = []
-  const onResp = async (r) => {
-    try {
-      const u = r.url()
-      if (!u.includes('/api/v1') || r.status() !== 200) return
-      if (!(r.headers()['content-type'] || '').includes('json')) return
-      const b = await r.text()
-      if (b.length > 100) captured.push(b)
-    } catch {}
-  }
-  p.on('response', onResp)
-
-  await dismiss()
-  // .first(): «Платежи» есть и в меню, и во вкладках — при нескольких совпадениях
-  // строгий режим Playwright отказывается кликать, и переход молча не происходил
-  try { await p.locator('text=Платежи').first().click({ timeout: 6000 }); await p.waitForTimeout(1500) } catch {}
-  for (const t of tabs) {
-    try { await dismiss(); await p.locator(`text=${t.label}`).first().click({ timeout: 6000 }); await p.waitForTimeout(2500) } catch {}
-  }
-  await p.waitForTimeout(1000)
-  p.off('response', onResp)
-
-  // Ищем в захваченном трафике форму, где лежит наш документ
-  for (const body of captured) {
-    let parsed
-    try { parsed = JSON.parse(body) } catch { continue }
-    for (const cmd of (parsed.commands || [])) {
-      const name = cmd.instanceName || ''
-      const tab = tabs.find(t => DOC_FORMS[t.key] === name)
-      if (!tab || !cmd.instanceToken) continue
-      const items = cmd.fields?.payments?.items || []
-      if (items.some(it => String(fieldVal(it.id)) === String(id))) {
-        target = { key: tab.key, form: name, token: cmd.instanceToken, actions: Object.keys(cmd.actions || {}) }
-        break
-      }
-    }
-    if (target) break
-  }
-  if (!target) throw new Error('документ не найден среди черновиков и на подпись — возможно, уже подписан')
-  console.log('[sign] документ найден в', target.form, '| действия:', target.actions.join(', '))
-
-  const signAction = target.actions.includes('_sign') ? '_sign'
-    : target.actions.includes('_saveAndSign') ? '_saveAndSign' : null
-  if (!signAction) throw new Error(`банк не предлагает подпись для этого документа (доступно: ${target.actions.join(', ')})`)
-
-  const formSeg = target.form.replace(/^ui\//, '')
-
-  // Выбор строки грида. По пойманному протоколу банк принимает значения ТОЛЬКО
-  // отдельным stateUpdate с submitField (так же выбирается счёт в форме
-  // перевода), а doAction идёт с пустыми fields.
-  await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/stateUpdate`, {
-    instanceToken: target.token,
-    fields: { payments: { value: String(id) } },
-    submitField: 'payments',
+  // 2) prepareSign — банк готовит подпись и возвращает серийник токена
+  r = await bankApi(p, 'POST', `/api/v1/${MODULE}/prepareSign`, {
+    cryptoProfileId: eTokenProfile.id,
+    ids: [String(id)],
   })
-  let res = await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/doAction`, {
-    actionId: signAction,
-    fields: {},
-    instanceToken: target.token,
-  })
-  console.log('[sign] после', signAction, '→ формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
-
-  // Запасной вариант: некоторые гриды принимают id прямо в действии
-  if ((res.json?.commands || []).length === 0) {
-    console.log('[sign] пустой ответ — пробую id внутри doAction')
-    res = await bankApi(p, 'PUT', `/api/v1/ui/${formSeg}/doAction`, {
-      actionId: signAction,
-      fields: { payments: { value: String(id) } },
-      instanceToken: target.token,
-    })
-    console.log('[sign] запасной вариант →', (res.json?.commands || []).map(c => c.instanceName).join(', '))
+  const d = r.json?.data || r.json
+  console.log('[sign] prepareSign ответ:', JSON.stringify(d).slice(0, 400))
+  if (!d?.transactionId) {
+    const msg = d?.outputMessages?.[0]?.message || d?.result?.errorMessage || 'банк не начал подпись'
+    throw new Error(msg)
   }
+  if (d.result?.hasErrors) throw new Error(d.result.errorMessage || 'ошибка подготовки подписи')
 
-  // Выбор средства подписи. Протокол пойман с живой подписи: значение уходит
-  // отдельным stateUpdate с submitField, а doAction идёт с пустыми fields
-  // и actionId "_save" (не "_ok").
-  const cryptoForm = findForm(res, /cryptoProfileSelect/)
-  if (cryptoForm?.instanceToken) {
-    const profiles = cryptoForm.fields?.cryptoProfiles
-    const chosen = fieldVal(profiles) || (profiles?.items || [])[0]?.id
-    if (chosen) {
-      await bankApi(p, 'PUT', '/api/v1/client/cryptoProfileSelect/stateUpdate', {
-        instanceToken: cryptoForm.instanceToken,
-        fields: { cryptoProfiles: { value: String(chosen) } },
-        submitField: 'cryptoProfiles',
-      })
-    }
-    res = await bankApi(p, 'PUT', '/api/v1/client/cryptoProfileSelect/doAction', {
-      actionId: '_save',
-      fields: {},
-      instanceToken: cryptoForm.instanceToken,
-    })
-    console.log('[sign] после cryptoProfileSelect → формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
-  }
-
-  // Форма ввода ключа eToken PASS — достаём серийный номер токена
-  const etoken = findForm(res, /eTokenPassSign|eToken/i)
-  if (!etoken?.instanceToken) {
-    // Не дошли до ввода ключа — вернём, что показал банк, для разбора
-    const errors = (res.json?.commands || []).flatMap(c => Object.entries(c.fields || {}))
-      .flatMap(([fid, f]) => (f.errors || []).map(e => `${fid}: ${e.message || e}`))
-    throw new Error('банк не запросил ключ eToken. ' + (errors.join('; ') || 'формы: ' + (res.json?.commands || []).map(c => c.instanceName).join(', ')))
-  }
-
-  const serialField = Object.entries(etoken.fields || {})
-    .find(([k]) => /serial|номер/i.test(k))
-  const serial = serialField ? String(fieldVal(serialField[1])) : ''
-
+  const serial = d.result?.serialNumber || d.serialNumber || ''
   pendingSigns.set(String(id), {
-    token: etoken.instanceToken,
-    // Поле ключа называется "key" — подтверждено перехватом живой подписи
-    keyFieldName: Object.keys(etoken.fields || {}).find(k => /^key$/i.test(k)) || 'key',
+    module: MODULE,
+    transactionId: d.transactionId,
+    serial,
     startedAt: Date.now(),
   })
-  console.log('[sign] окно ключа eToken, серийник:', serial, '| поля:', Object.keys(etoken.fields || {}).join(', '))
-
-  return {
-    stage: 'needKey',
-    serial,
-    fields: Object.keys(etoken.fields || {}),
-  }
+  console.log('[sign] prepareSign ок, серийник:', serial, '| txId:', d.transactionId)
+  return { stage: 'needKey', serial }
 }
 
-/** Шаг 2: отправить ключ с токена и дождаться подтверждения PayControl. */
 async function signSubmitKey(username, password, { id, key }) {
+  // continueSign {model:{code}, transactionId} — ключ токена идёт в model.code
   if (!key) throw new Error('не передан ключ токена')
   const pend = pendingSigns.get(String(id))
   if (!pend) throw new Error('подпись не начата или истекла — начните заново')
-
   const p = await ensureLoggedIn(username, password)
 
-  // Протокол пойман с живой подписи: значение ключа уходит ОТДЕЛЬНЫМ stateUpdate
-  // с submitField, а подтверждение — doAction с actionId "ready" и пустыми fields.
-  // Раньше ключ слался внутри doAction с actionId "sign" — банк это игнорировал.
-  await bankApi(p, 'PUT', '/api/v1/client/eTokenPassSign/stateUpdate', {
-    instanceToken: pend.token,
-    fields: { [pend.keyFieldName]: { value: String(key) } },
-    submitField: pend.keyFieldName,
+  const r = await bankApi(p, 'POST', `/api/v1/${pend.module}/continueSign`, {
+    model: { code: String(key) },
+    transactionId: pend.transactionId,
   })
-  let res = await bankApi(p, 'PUT', '/api/v1/client/eTokenPassSign/doAction', {
-    actionId: 'ready',
-    fields: {},
-    instanceToken: pend.token,
-  })
-  console.log('[sign] после ввода ключа → формы:', (res.json?.commands || []).map(c => c.instanceName).join(', '))
+  const d = r.json?.data || r.json
+  console.log('[sign] continueSign ответ:', JSON.stringify(d).slice(0, 400))
 
-  // Ошибка ключа?
-  const keyErrors = (res.json?.commands || []).flatMap(c => Object.entries(c.fields || {}))
-    .flatMap(([fid, f]) => (f.errors || []).map(e => `${fid}: ${e.message || e}`))
-  if (keyErrors.length) { pendingSigns.delete(String(id)); return { stage: 'error', errors: keyErrors } }
-
-  // PayControl: банк ждёт подтверждения в приложении на телефоне — опрашиваем
-  const paycontrol = findForm(res, /paycontrol/i)
-  if (paycontrol?.instanceToken) {
-    for (let i = 0; i < 30; i++) {
-      // Опрос статуса PayControl — банк использует actionId "_onTimer"
-      const poll = await bankApi(p, 'PUT', '/api/v1/client/paycontrol/sign/doAction', {
-        actionId: '_onTimer', instanceToken: paycontrol.instanceToken,
-      })
-      const text = JSON.stringify(poll.json || {})
-      if (/доставлен|подписан|success|signed|confirmed/i.test(text)) {
-        pendingSigns.delete(String(id))
-        return { stage: 'done', message: 'Документ подписан и доставлен в банк' }
-      }
-      if (/ошиб|отклон|error|reject|timeout/i.test(text)) {
-        pendingSigns.delete(String(id))
-        return { stage: 'error', errors: ['PayControl: подтверждение не получено'] }
-      }
-      await p.waitForTimeout(3000)
-    }
-    return { stage: 'waitingPayControl', message: 'Подтвердите операцию в приложении PayControl на телефоне' }
+  const signResults = d?.signResults || d?.result?.signResults
+  const ok = Array.isArray(signResults)
+    ? signResults.every(s => s.result || s.signed || !s.hasErrors)
+    : !!d?.result
+  if (ok) {
+    pendingSigns.delete(String(id))
+    return { stage: 'done', message: 'Документ подписан' }
   }
-
-  pendingSigns.delete(String(id))
-  return { stage: 'done', message: 'Документ подписан' }
+  const msg = d?.outputMessages?.[0]?.message || d?.result?.errorMessage || 'ключ не принят'
+  return { stage: 'error', errors: [msg] }
 }
+
 
 /**
  * Разведка документного API: ищем, каким запросом банк отдаёт список документов
