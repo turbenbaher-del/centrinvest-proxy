@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser } = require('./browser')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -370,6 +370,15 @@ app.get('/api/documents/:id/sign/status', async (req, res) => {
     res.json({ success: data.stage !== 'error', data })
   } catch (err) {
     console.error('[sign status]', err.message)
+    res.status(400).json({ success: false, error: err.message })
+  }
+})
+
+// Отмена подписи: гасим висящую операцию в банке, если человек закрыл окно.
+app.post('/api/documents/:id/sign/cancel', async (req, res) => {
+  try {
+    res.json({ success: true, data: await signCancel(USERNAME, PASSWORD, { id: req.params.id }) })
+  } catch (err) {
     res.status(400).json({ success: false, error: err.message })
   }
 })

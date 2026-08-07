@@ -2619,6 +2619,7 @@ async function signPrepareMain(p, id, main, confirmTransactionId) {
   pendingSigns.set(String(id), {
     stage: viaPayControl ? 'payControl' : 'needKey',
     transactionId: d.transactionId,
+    pcOperationId: d.result?.pcOperationId,
     confirmTransactionId,
     serial: d.result?.serialNumber || '',
     startedAt: Date.now(),
@@ -2701,6 +2702,27 @@ async function signSubmitKey(username, password, { id, key }) {
   return sent.ok
     ? { stage: 'done', message: 'Документ подписан и отправлен в банк' }
     : { stage: 'signed', message: 'Документ подписан, но не отправлен: ' + sent.error }
+}
+
+// Отмена начатой подписи. Если человек закрыл окно на шаге подтверждения,
+// в банке остаётся висящая операция PayControl — фронт банка её тоже гасит
+// (usePreparePayContolSignLoop → paycontrol/cancel).
+async function signCancel(username, password, { id }) {
+  const pend = pendingSigns.get(String(id))
+  if (!pend) return { cancelled: false }
+  pendingSigns.delete(String(id))
+  if (pend.stage !== 'payControl' || !pend.transactionId) return { cancelled: true }
+  try {
+    const p = await ensureLoggedIn(username, password)
+    await bankApi(p, 'POST', `/api/v1/${PAYCONTROL_MODULE}/cancel`, {
+      transactionId: pend.transactionId,
+      pcOperationId: pend.pcOperationId,
+    })
+    console.log('[sign] подпись отменена, операция PayControl погашена')
+  } catch (e) {
+    console.warn('[sign] отмена в банке не прошла:', e.message)
+  }
+  return { cancelled: true }
 }
 
 // POST {module}/send {ids, confirmTransactionId, userWorkspace}
@@ -2879,4 +2901,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser }
