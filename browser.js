@@ -2406,17 +2406,43 @@ async function transferOwnStructured(username, password, { fromAccount, toAccoun
 
     // Подтверждение создания документа — успех
     const ok = cmds.find(c => /confirmDialog/.test(c.instanceName || ''))
-    if (ok) return { ok: true, saved: true }
+    if (ok) return { ok: true, saved: true, id: await findCreatedDoc(p, { amount, purpose }) }
 
     // Форма закрылась без ошибок — документ сохранён
     const closed = cmds.some(c => c.command === 'formClose' && /r030accounts/.test(c.instanceName || ''))
-    if (closed) return { ok: true, saved: true }
+    if (closed) return { ok: true, saved: true, id: await findCreatedDoc(p, { amount, purpose }) }
 
     break
   }
 
   // Не поняли ответ — отдаём, что пришло, честно
   return { ok: false, error: 'неожиданный ответ банка', commands: (resp.json?.commands || []).map(c => c.instanceName).filter(Boolean) }
+}
+
+/**
+ * Найти только что созданный черновик, чтобы сразу предложить его подписать.
+ * Форма сохранения id документа не отдаёт, поэтому ищем в списке свежий
+ * документ в статусе «new» с той же суммой и назначением. Если совпадений
+ * несколько — берём последний по номеру: это и есть только что созданный.
+ */
+async function findCreatedDoc(p, { amount, purpose }) {
+  try {
+    const r = await bankApi(p, 'GET', `/api/v1/${SIGN_MODULE}/list?_offset=0&_limit=300`, null)
+    const list = r.json?.list || r.json?.data?.list || []
+    const sum = Number(amount).toFixed(2)
+    const norm = s => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase()
+    const hits = list.filter(x =>
+      x.state === 'new' &&
+      Number(x.sum).toFixed(2) === sum &&
+      (!purpose || norm(x.purpose) === norm(purpose)))
+    if (!hits.length) return undefined
+    const last = hits.sort((a, b) => Number(a.docNumber || 0) - Number(b.docNumber || 0)).pop()
+    console.log('[transfer2] созданный документ №' + last.docNumber, '| id:', String(last.id).slice(0, 16) + '…')
+    return last.id
+  } catch (e) {
+    console.warn('[transfer2] не удалось найти созданный документ:', e.message)
+    return undefined
+  }
 }
 
 /**
