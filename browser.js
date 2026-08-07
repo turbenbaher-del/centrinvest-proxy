@@ -1994,41 +1994,36 @@ async function getDocuments(username, password) {
   const ready = await waitForAppReady(p, 45000)
   if (!ready) throw new Error('Интерфейс ДБО не загрузился — банк не отдал содержимое страницы')
 
-  // Основной путь: спрашиваем формы у банка напрямую. Клики по вкладкам ненадёжны
-  // (данные уже в памяти страницы, новых запросов нет — слушать нечего), а этот
-  // способ уже доказал работоспособность: так подпись находит документ.
+  // Основной путь: чистый REST-список рублёвых платёжек (из исходников фронта):
+  // GET /api/v1/doc/rur/payorders?_limit=200 — отдаёт документы с id и статусами
+  // напрямую, без кликов по вкладкам, модалок и парсинга форм.
   try {
-    const r = await bankApi(p, 'POST', '/api/v1/menu/click', { menuItem: 'corporate-api-menu-small-r020statement' })
-    const direct = []
-    const seenDirect = new Set()
-    for (const cmd of (r.json?.commands || [])) {
-      const items = cmd.fields?.payments?.items
-      if (!Array.isArray(items)) continue
-      for (const it of items) {
-        const id = String(fieldValue(it.id) ?? '')
-        if (!id || seenDirect.has(id)) continue
-        seenDirect.add(id)
-        direct.push({
-          id,
-          number: String(fieldValue(it.docNumber) ?? '').trim(),
-          account: String(fieldValue(it.payerAccount) ?? '').replace(/\D/g, ''),
-          recipient: String(fieldValue(it.receiverName) ?? '').trim(),
-          purpose: String(fieldValue(it.paymentPurpose) ?? '').trim(),
-          amount: -Math.abs(toAmount(fieldValue(it.documentSum))),
-          direction: 'out',
-          status: String(fieldValue(it.stateName) ?? '').trim() || 'НЕИЗВЕСТЕН',
-          stateCode: String(fieldValue(it.stateCode) ?? '').trim(),
-          actions: Array.isArray(it.actions) ? it.actions : Object.keys(it.actions || {}),
-        })
-      }
+    const r = await bankApi(p, 'GET', '/api/v1/doc/rur/payorders?_offset=0&_limit=200', null)
+    const raw = r.json
+    const arr = Array.isArray(raw) ? raw
+      : Array.isArray(raw?.items) ? raw.items
+      : Array.isArray(raw?.data) ? raw.data
+      : Array.isArray(raw?.list) ? raw.list
+      : Array.isArray(raw?.rows) ? raw.rows : null
+    if (arr && arr.length > 0) {
+      console.log('[documents] REST payorders: получено', arr.length, '| поля:', Object.keys(arr[0]).join(','))
+      const pick = (o, ...names) => { for (const n of names) { const v = fieldValue(o[n]); if (v !== undefined && v !== null && String(v).trim() !== '') return v } return '' }
+      return arr.map(it => ({
+        id: String(pick(it, 'id', 'docId', 'guid')),
+        number: String(pick(it, 'docNumber', 'number', 'num')).trim(),
+        account: String(pick(it, 'payerAccount', 'accountNumber', 'account')).replace(/\D/g, ''),
+        recipient: String(pick(it, 'receiverName', 'correspondentName', 'payeeName')).trim(),
+        purpose: String(pick(it, 'paymentPurpose', 'purpose', 'description')).trim(),
+        amount: -Math.abs(toAmount(pick(it, 'documentSum', 'sum', 'amount'))),
+        direction: 'out',
+        status: String(pick(it, 'stateName', 'state', 'statusName', 'status')).trim() || 'НЕИЗВЕСТЕН',
+        stateCode: String(pick(it, 'stateCode', 'statusCode')).trim(),
+        actions: Array.isArray(it.actions) ? it.actions : Object.keys(it.actions || {}),
+      })).filter(d => d.id)
     }
-    if (direct.length > 0) {
-      console.log(`[documents] получено напрямую из форм банка: ${direct.length}`)
-      return direct
-    }
-    console.log('[documents] прямой запрос форм пуст, пробую обход по вкладкам')
+    console.log('[documents] REST payorders пуст, пробую обход по вкладкам. Ответ:', JSON.stringify(raw).slice(0, 300))
   } catch (e) {
-    console.log('[documents] прямой запрос форм не удался:', e.message)
+    console.log('[documents] REST payorders не удался:', e.message)
   }
 
   const bodies = []
