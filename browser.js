@@ -2000,7 +2000,9 @@ async function getDocuments(username, password) {
   // showForSign. Никаких кликов по вкладкам, модалок и парсинга форм.
   try {
     const r = await bankApi(p, 'GET', '/api/v1/doc/rur/payorders/list?_offset=0&_limit=300', null)
+    // Массив приходит под ключом list (подтверждено ответом банка)
     const arr = Array.isArray(r.json) ? r.json
+      : Array.isArray(r.json?.list) ? r.json.list
       : Array.isArray(r.json?.items) ? r.json.items
       : Array.isArray(r.json?.data) ? r.json.data : null
     if (arr && arr.length > 0) {
