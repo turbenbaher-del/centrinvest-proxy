@@ -2595,6 +2595,10 @@ async function signStart(username, password, { id }) {
       mainProfileId: main.id,
       mainTypeName: main.typeName,
       serial,
+      // Счётчик попыток и признак автосинхронизации: когда попытки кончаются,
+      // банк не блокирует токен сразу, а предлагает синхронизацию двумя ключами.
+      attemptsLeft: cd.result?.cryptoParamsModel?.maxAttempts ?? 3,
+      autoSyncEnabled: cd.result?.cryptoParamsModel?.autoSyncEnabled !== false,
       startedAt: Date.now(),
     })
     console.log('[sign] подтверждающая подпись:', confirmProfile.typeName, '| серийник:', serial)
@@ -2625,6 +2629,9 @@ async function signPrepareMain(p, id, main, confirmTransactionId) {
   console.log('[sign] основная подпись:', main.typeName, '| txId:', d.transactionId)
   if (viaPayControl) {
     return { stage: 'confirm', confirmType: 'payControl',
+      // Банк даёт QR: его можно отсканировать в «Центр-инвест Бизнес»,
+      // если подтверждение не пришло в приложение само.
+      qrCode: d.qrCode || d.result?.qrCode || undefined,
       message: 'Подтвердите операцию в приложении PayControl на телефоне' }
   }
   return { stage: 'needKey', serial: d.result?.serialNumber || '',
@@ -2683,11 +2690,65 @@ async function signSubmitKey(username, password, { id, key }) {
     const msg = d?.outputMessages?.[0]?.message
       || (d?.signResults || []).map(s => s.message).filter(Boolean)[0]
       || 'ключ не принят'
-    return { stage: 'error', errors: [msg] }
+    // Попытки конечны. Когда они исчерпаны, банк не блокирует токен сразу:
+    // при включённой автосинхронизации он просит ввести ДВА ключа подряд,
+    // чтобы заново совпасть со счётчиком устройства.
+    pend.attemptsLeft = (pend.attemptsLeft ?? 1) - 1
+    if (pend.attemptsLeft <= 0 && pend.autoSyncEnabled) {
+      pend.stage = 'sync'
+      pendingSigns.set(String(id), pend)
+      console.log('[sign] попытки исчерпаны — нужна синхронизация токена')
+      return { stage: 'sync', serial: pend.serial, errors: [msg] }
+    }
+    pendingSigns.set(String(id), pend)
+    return { stage: 'error', attemptsLeft: pend.attemptsLeft, errors: [msg] }
   }
 
   // Ключ приняли. Если это была подтверждающая подпись — переходим к основной
   // (PayControl), и только после неё документ уходит в банк.
+  if (pend.mainProfileId) {
+    const list = await getCryptoProfiles(p, [String(id)])
+    const main = list.find(x => x.id === pend.mainProfileId) || list.find(x => isPayControl(x.typeName))
+    if (!main) throw new Error('средство основной подписи пропало из списка')
+    return signPrepareMain(p, id, main, pend.confirmTransactionId)
+  }
+
+  pendingSigns.delete(String(id))
+  const sent = await sendDocument(p, id, pend.confirmTransactionId)
+  return sent.ok
+    ? { stage: 'done', message: 'Документ подписан и отправлен в банк' }
+    : { stage: 'signed', message: 'Документ подписан, но не отправлен: ' + sent.error }
+}
+
+/**
+ * Синхронизация токена eToken PASS. Когда попытки ввода ключа исчерпаны,
+ * банк просит ДВА ключа подряд, чтобы заново совпасть со счётчиком устройства
+ * (форма ETokenPassSynchronization во фронте банка). Это тот же continueSign,
+ * но с моделью {firstKey, secondKey} вместо {code}.
+ * Если и здесь ключи неверны — банк блокирует пользователя.
+ */
+async function signSyncToken(username, password, { id, firstKey, secondKey }) {
+  if (!firstKey || !secondKey) throw new Error('нужны оба ключа с токена')
+  const pend = pendingSigns.get(String(id))
+  if (!pend || pend.stage !== 'sync') throw new Error('синхронизация не запрошена — начните подпись заново')
+  const p = await ensureLoggedIn(username, password)
+
+  const txId = pend.confirmTransactionId || pend.transactionId
+  const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/continueSign`, {
+    model: { firstKey: String(firstKey), secondKey: String(secondKey) },
+    transactionId: txId,
+  })
+  const d = r.json?.data || r.json
+  console.log('[sign] синхронизация ответ:', JSON.stringify(d).slice(0, 300))
+
+  if (!signResultsOk(d)) {
+    pendingSigns.delete(String(id))
+    const msg = d?.outputMessages?.[0]?.message || 'ключи не подошли'
+    return { stage: 'error', errors: [msg + '. Банк мог заблокировать доступ — обратитесь в банк'] }
+  }
+
+  // Синхронизация удалась и заодно закрыла подтверждающую подпись —
+  // дальше обычный путь: основная подпись, затем отправка.
   if (pend.mainProfileId) {
     const list = await getCryptoProfiles(p, [String(id)])
     const main = list.find(x => x.id === pend.mainProfileId) || list.find(x => isPayControl(x.typeName))
@@ -2899,4 +2960,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser }

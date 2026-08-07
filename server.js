@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser } = require('./browser')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -370,6 +370,20 @@ app.get('/api/documents/:id/sign/status', async (req, res) => {
     res.json({ success: data.stage !== 'error', data })
   } catch (err) {
     console.error('[sign status]', err.message)
+    res.status(400).json({ success: false, error: err.message })
+  }
+})
+
+// Синхронизация токена: попытки ввода ключа исчерпаны, банк просит два ключа
+// подряд. Это последний шанс — при неверных ключах банк блокирует доступ.
+app.post('/api/documents/:id/sign/sync', async (req, res) => {
+  const { firstKey, secondKey } = req.body || {}
+  try {
+    const data = await signSyncToken(USERNAME, PASSWORD, { id: req.params.id, firstKey, secondKey })
+    invalidateCache()
+    res.json({ success: data.stage !== 'error', data })
+  } catch (err) {
+    console.error('[sign sync]', err.message)
     res.status(400).json({ success: false, error: err.message })
   }
 })
