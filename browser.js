@@ -2648,25 +2648,51 @@ async function signStatus(username, password, { id }) {
   }
 
   const p = await ensureLoggedIn(username, password)
-  const r = await bankApi(p, 'GET',
-    `/api/v1/${PAYCONTROL_MODULE}/signresult?transactionId=${encodeURIComponent(pend.transactionId)}`, null)
-  const d = r.json?.data || r.json
-  console.log('[sign] статус PayControl:', JSON.stringify(d).slice(0, 200))
 
-  if (signResultsOk(d)) {
+  // Банк узнаёт о подтверждении PayControl НЕ опросом, а push-подпиской по
+  // вебсокету (useOmniSubscription 'PayControlEvent:<pcTransactionId>' в его
+  // фронте). Метод paycontrol/signresult используется у них только при отмене
+  // и до подтверждения всегда отдаёт пустой signResults — опрос по нему висел
+  // вечно. Через прокси вебсокет не поймать, поэтому смотрим самый надёжный
+  // признак: состояние самого документа. Пока он «new» — подписи нет.
+  const state = await getDocState(p, id)
+  console.log('[sign] состояние документа:', state || '—')
+
+  if (state && state !== 'new') {
     pendingSigns.delete(String(id))
-    const sent = await sendDocument(p, id, pend.confirmTransactionId)
-    return sent.ok
-      ? { stage: 'done', message: 'Документ подписан и отправлен в банк' }
-      : { stage: 'signed', message: 'Документ подписан, но не отправлен: ' + sent.error }
+    // Документ уже ушёл дальше по конвейеру банка — отправлять нечего.
+    if (['delivered', 'accepted', 'inProcess', 'processed'].includes(state)) {
+      return { stage: 'done', message: 'Документ подписан и отправлен в банк' }
+    }
+    if (state === 'signed' || state === 'partlySigned') {
+      const sent = await sendDocument(p, id, pend.confirmTransactionId)
+      return sent.ok
+        ? { stage: 'done', message: 'Документ подписан и отправлен в банк' }
+        : { stage: 'signed', message: 'Документ подписан, но не отправлен: ' + sent.error }
+    }
+    // Банк отклонил документ — честно говорим, а не выдаём за успех
+    return { stage: 'error', errors: ['Банк не принял документ: ' + (DOC_STATE_NAMES[state] || state)] }
   }
 
-  const failed = (d?.signResults || []).some(s => s.result && s.result !== SIGN_OK)
-  if (failed) {
+  // Ждём слишком долго — подтверждение в приложении, видимо, не сделали
+  if (Date.now() - (pend.startedAt || 0) > 10 * 60 * 1000) {
     pendingSigns.delete(String(id))
-    return { stage: 'error', errors: [d?.outputMessages?.[0]?.message || 'подтверждение отклонено'] }
+    return { stage: 'error', errors: ['Подтверждение в PayControl не пришло за 10 минут — начните подпись заново'] }
   }
+
   return { stage: 'confirm', confirmType: 'payControl', message: 'Ждём подтверждения в PayControl' }
+}
+
+/** Текущее состояние документа по списку банка: самый надёжный признак подписи. */
+async function getDocState(p, id) {
+  try {
+    const r = await bankApi(p, 'GET', `/api/v1/${SIGN_MODULE}/list?_offset=0&_limit=300`, null)
+    const list = r.json?.list || r.json?.data?.list || []
+    return list.find(x => String(x.id) === String(id))?.state
+  } catch (e) {
+    console.warn('[sign] не удалось прочитать состояние документа:', e.message)
+    return undefined
+  }
 }
 
 async function signSubmitKey(username, password, { id, key }) {
