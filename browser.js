@@ -67,7 +67,25 @@ async function ensureLoggedIn(username, password) {
   // Если же логиниться через классическую страницу напрямую, банк возвращает
   // в старый main.zul, откуда переход в api-ui сбрасывает сессию.
   await page.goto(API_UI_URL, { waitUntil: 'commit', timeout: 30000 })
-  await page.waitForSelector('#userName', { timeout: 30000, state: 'attached' })
+  try {
+    await page.waitForSelector('#userName', { timeout: 30000, state: 'attached' })
+  } catch (e) {
+    // Формы входа нет — надо знать почему: ограничение по адресу, заглушка
+    // банка или изменившаяся страница. Без этого причина неотличима.
+    const seen = await page.evaluate(() => ({
+      url: location.href,
+      title: document.title,
+      text: (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 400),
+    })).catch(() => ({ url: '?', title: '?', text: '' }))
+    console.error('[browser] Форма входа не появилась.')
+    console.error('[browser] URL:', seen.url, '| Заголовок:', seen.title)
+    console.error('[browser] Страница:', seen.text || '(пусто)')
+    throw new Error(
+      seen.text
+        ? 'Банк не показал форму входа. Ответ банка: ' + seen.text.slice(0, 200)
+        : 'Банк не показал форму входа и вернул пустую страницу — вероятно, доступ ограничен'
+    )
+  }
   // '#btn' раскрывает форму «вход по логину/паролю» (поля скрыты до клика)
   try { await page.click('#btn', { timeout: 3000 }) } catch {}
   await page.fill('#userName', username.toLowerCase(), { timeout: 15000 })
