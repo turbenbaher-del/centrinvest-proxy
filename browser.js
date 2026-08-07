@@ -2031,6 +2031,10 @@ async function getDocuments(username, password) {
         purpose: String(it.purpose ?? '').trim(),
         amount: -Math.abs(toAmount(it.sum)),
         direction: 'out',
+        // Дата документа. Без неё список нечем было упорядочить, и платежи
+        // шли вперемешку — в том порядке, в каком их отдал банк.
+        // stateChangeDate — запасной вариант для документов без даты создания.
+        date: String(it.docDate ?? it.stateChangeDate ?? '').slice(0, 10),
         // Статус — код в поле state; переводим в понятное название.
         // showForSign отмечает документы, ожидающие подписи.
         status: DOC_STATE_NAMES[String(it.state ?? '')] || String(it.state ?? '').trim() || 'НЕИЗВЕСТЕН',
