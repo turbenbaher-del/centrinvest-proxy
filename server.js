@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi } = require('./browser')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -591,6 +591,32 @@ app.get('/api/statement', async (req, res) => {
     res.send(buffer)
   } catch (err) {
     console.error('[statement]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Мост к REST-API банка (/api/v1/...) — тому самому, которым пользуется
+// веб-версия d2sme. Позволяет приложению работать с банком напрямую, а не
+// через разбор страниц: списки, фильтры, документы, справочники.
+//
+// Тело: { method, path, body }. Путь обязан начинаться с /api/v1/.
+// Ответ банка возвращается как есть — интерпретирует вызывающая сторона.
+//
+// ВНИМАНИЕ: через мост доступны и операции, двигающие деньги (подпись,
+// отправка документа). Мост закрыт тем же PROXY_TOKEN, что и остальные
+// маршруты; ответственность за вызовы — на вызывающей стороне.
+app.post('/api/bank', async (req, res) => {
+  const { method = 'GET', path, body = null } = req.body || {}
+  if (!path || typeof path !== 'string' || !path.startsWith('/api/v1/')) {
+    return res.status(400).json({ success: false, error: 'path должен начинаться с /api/v1/' })
+  }
+  try {
+    const r = await callBankApi(dbo().login, dbo().password, { method, path, body })
+    // Изменяющие запросы могли поменять данные — сбрасываем кэш чтения.
+    if (String(method).toUpperCase() !== 'GET') invalidateCache()
+    res.json({ success: true, status: r.status, data: r.json })
+  } catch (err) {
+    console.error('[bank]', method, path, err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })

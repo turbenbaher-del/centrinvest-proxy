@@ -188,8 +188,17 @@ async function waitForAppReady(p, timeoutMs = 60000) {
     await p.waitForTimeout(1500)
   }
 
-  const len = await p.evaluate(() => (document.body.innerText || '').length).catch(() => 0)
-  console.warn(`[browser] Интерфейс не отрисовался за ${timeoutMs / 1000} c (текста на странице: ${len} символов)`)
+  // Что именно показал банк вместо интерфейса. Без этого причина неизвестна:
+  // «страница не отрисовалась» одинаково выглядит и при блокировке, и при
+  // сообщении банка, и при занятой сессии.
+  const seen = await p.evaluate(() => ({
+    len: (document.body.innerText || '').length,
+    text: (document.body.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 400),
+    url: location.href,
+  })).catch(() => ({ len: 0, text: '', url: '' }))
+  console.warn(`[browser] Интерфейс не отрисовался за ${timeoutMs / 1000} c (текста: ${seen.len})`)
+  console.warn(`[browser] URL: ${seen.url}`)
+  console.warn(`[browser] Банк показывает: ${seen.text || '(пусто)'}`)
   return false
 }
 
@@ -1920,6 +1929,25 @@ async function bankApi(p, method, path, body) {
 }
 
 /**
+ * Мост к REST-API банка (/api/v1/...) из открытой сессии.
+ *
+ * У ДБО есть полноценный API d2sme — тот же, которым пользуется веб-версия.
+ * Скрейпинг страниц нужен был только потому, что этот API не был доступен
+ * снаружи. Мост открывает его вызывающей стороне: приложение делает те же
+ * запросы, что и веб-интерфейс, вместо разбора HTML.
+ *
+ * Возвращает {status, json} как есть, без интерпретации.
+ */
+async function callBankApi(username, password, { method = 'GET', path, body = null }) {
+  if (!path || !path.startsWith('/api/v1/')) {
+    throw new Error('путь должен начинаться с /api/v1/')
+  }
+  const p = await ensureLoggedIn(username, password)
+  await waitForAppReady(p, 45000)
+  return bankApi(p, String(method).toUpperCase(), path, body)
+}
+
+/**
  * Названия счетов («ГО», «корп.карта») и остатки по каждому счёту.
  *
  * Страница счетов в новом интерфейсе отдаёт только номера. Форма платежа
@@ -3030,4 +3058,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
