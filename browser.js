@@ -2394,6 +2394,7 @@ async function transferOwnStructured(username, password, { fromAccount, toAccoun
   console.log('[transfer2] после', action, '→', (resp.json?.commands || []).map(c => c.instanceName).join(', '))
 
   // 3) Разбираем диалоги/ошибки до успеха
+  let lastComplaint = ''          // последнее, что банк сказал про документ
   for (let step = 0; step < 8; step++) {
     const cmds = resp.json?.commands || []
 
@@ -2402,9 +2403,13 @@ async function transferOwnStructured(username, password, { fromAccount, toAccoun
       .flatMap(([id, f]) => (f.errors || []).map(e => id + ': ' + (e.message || e)))
     if (hard.length) return { ok: false, error: hard.join('; ') }
 
-    // Диалог предупреждений (WARN) — продолжаем нашим действием
+    // Диалог предупреждений (WARN) — продолжаем нашим действием.
+    // Текст запоминаем: если дальше упрёмся, человеку нужно знать причину,
+    // а не «неожиданный ответ банка».
     const es = cmds.find(c => /errorsSave/.test(c.instanceName || ''))
     if (es?.instanceToken) {
+      const said = collectMessages(es)
+      if (said) { lastComplaint = said; console.log('[transfer2] банк предупреждает:', said.slice(0, 200)) }
       resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
         { actionId: action, fields: {}, instanceToken: es.instanceToken })
       continue
@@ -2421,8 +2426,39 @@ async function transferOwnStructured(username, password, { fromAccount, toAccoun
     break
   }
 
-  // Не поняли ответ — отдаём, что пришло, честно
-  return { ok: false, error: 'неожиданный ответ банка', commands: (resp.json?.commands || []).map(c => c.instanceName).filter(Boolean) }
+  // Сюда попадаем, когда банк не подтвердил сохранение. Раньше отдавалось
+  // бессмысленное «неожиданный ответ банка» — человек не понимал ни что
+  // случилось, ни что делать. Показываем то, что банк сказал на самом деле.
+  const said = lastComplaint
+    || (resp.json?.commands || []).map(collectMessages).filter(Boolean).join('; ')
+  console.log('[transfer2] документ не сохранён.',
+    'Команды:', (resp.json?.commands || []).map(c => c.instanceName).join(', '),
+    '| Текст:', said || '—')
+  return {
+    ok: false,
+    error: said || 'Банк не подтвердил сохранение документа. Проверьте счета, сумму и назначение — и попробуйте ещё раз',
+    commands: (resp.json?.commands || []).map(c => c.instanceName).filter(Boolean),
+  }
+}
+
+/**
+ * Собрать читаемый текст из ответа банка: он раскладывает сообщения по разным
+ * местам — отдельные тексты, подписи полей, ошибки полей.
+ */
+function collectMessages(cmd) {
+  if (!cmd) return ''
+  const out = []
+  const push = v => { const s = String(v ?? '').trim(); if (s && !out.includes(s)) out.push(s) }
+
+  for (const key of ['message', 'text', 'title', 'description']) push(cmd[key])
+  for (const f of Object.values(cmd.fields || {})) {
+    push(f?.value); push(f?.label)
+    for (const e of (f?.errors || [])) push(e?.message || e)
+  }
+  for (const m of (cmd.messages || cmd.outputMessages || [])) push(m?.message || m)
+
+  // Служебные подписи кнопок в текст ошибки не нужны
+  return out.filter(s => !/^(ок|отмена|продолжить|закрыть|распечатать)$/i.test(s)).join('. ')
 }
 
 /**
