@@ -1994,36 +1994,37 @@ async function getDocuments(username, password) {
   const ready = await waitForAppReady(p, 45000)
   if (!ready) throw new Error('Интерфейс ДБО не загрузился — банк не отдал содержимое страницы')
 
-  // Основной путь: чистый REST-список рублёвых платёжек (из исходников фронта):
-  // GET /api/v1/doc/rur/payorders?_limit=200 — отдаёт документы с id и статусами
-  // напрямую, без кликов по вкладкам, модалок и парсинга форм.
+  // Основной путь: чистый REST-список рублёвых платёжек. Точный эндпоинт и поля
+  // подтверждены разведкой: GET /api/v1/doc/rur/payorders/list отдаёт массив
+  // документов с id, docNumber, sum, payer, receiver, purpose, state, stateCode,
+  // showForSign. Никаких кликов по вкладкам, модалок и парсинга форм.
   try {
-    const r = await bankApi(p, 'GET', '/api/v1/doc/rur/payorders?_offset=0&_limit=200', null)
-    const raw = r.json
-    const arr = Array.isArray(raw) ? raw
-      : Array.isArray(raw?.items) ? raw.items
-      : Array.isArray(raw?.data) ? raw.data
-      : Array.isArray(raw?.list) ? raw.list
-      : Array.isArray(raw?.rows) ? raw.rows : null
+    const r = await bankApi(p, 'GET', '/api/v1/doc/rur/payorders/list?_offset=0&_limit=300', null)
+    const arr = Array.isArray(r.json) ? r.json
+      : Array.isArray(r.json?.items) ? r.json.items
+      : Array.isArray(r.json?.data) ? r.json.data : null
     if (arr && arr.length > 0) {
-      console.log('[documents] REST payorders: получено', arr.length, '| поля:', Object.keys(arr[0]).join(','))
-      const pick = (o, ...names) => { for (const n of names) { const v = fieldValue(o[n]); if (v !== undefined && v !== null && String(v).trim() !== '') return v } return '' }
+      console.log('[documents] REST list: получено', arr.length)
+      const name = (o) => typeof o === 'string' ? o : (o?.name || o?.shortName || '')
       return arr.map(it => ({
-        id: String(pick(it, 'id', 'docId', 'guid')),
-        number: String(pick(it, 'docNumber', 'number', 'num')).trim(),
-        account: String(pick(it, 'payerAccount', 'accountNumber', 'account')).replace(/\D/g, ''),
-        recipient: String(pick(it, 'receiverName', 'correspondentName', 'payeeName')).trim(),
-        purpose: String(pick(it, 'paymentPurpose', 'purpose', 'description')).trim(),
-        amount: -Math.abs(toAmount(pick(it, 'documentSum', 'sum', 'amount'))),
+        id: String(it.id ?? ''),
+        number: String(it.docNumber ?? '').trim(),
+        account: String(it.payer?.accountNumber ?? it.payer?.account ?? '').replace(/\D/g, ''),
+        recipient: name(it.receiver).trim(),
+        purpose: String(it.purpose ?? '').trim(),
+        amount: -Math.abs(toAmount(it.sum)),
         direction: 'out',
-        status: String(pick(it, 'stateName', 'state', 'statusName', 'status')).trim() || 'НЕИЗВЕСТЕН',
-        stateCode: String(pick(it, 'stateCode', 'statusCode')).trim(),
-        actions: Array.isArray(it.actions) ? it.actions : Object.keys(it.actions || {}),
+        // Статус документа — в поле state; showForSign отмечает «под подпись»
+        status: String(it.state ?? '').trim() || 'НЕИЗВЕСТЕН',
+        stateCode: String(it.stateCode ?? '').trim(),
+        showForSign: !!it.showForSign,
+        showInProcess: !!it.showInProcess,
+        actions: [],
       })).filter(d => d.id)
     }
-    console.log('[documents] REST payorders пуст, пробую обход по вкладкам. Ответ:', JSON.stringify(raw).slice(0, 300))
+    console.log('[documents] REST list пуст, пробую обход по вкладкам. Ответ:', JSON.stringify(r.json).slice(0, 200))
   } catch (e) {
-    console.log('[documents] REST payorders не удался:', e.message)
+    console.log('[documents] REST list не удался:', e.message)
   }
 
   const bodies = []
