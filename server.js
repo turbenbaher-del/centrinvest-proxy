@@ -17,6 +17,7 @@ try {
 const express = require('express')
 const cors = require('cors')
 const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi } = require('./browser')
+const { audit, auditTail, maskAccount } = require('./audit')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -48,6 +49,7 @@ function dbo() {
     }
     liveSession = null
     console.log('[auth] сессия истекла — пароль стёрт из памяти')
+    audit('auth.expired', 'info', { reason: 'бездействие' })
   }
   if (ENV_LOGIN && ENV_PASSWORD) return { login: ENV_LOGIN, password: ENV_PASSWORD }
   return null
@@ -111,7 +113,7 @@ app.get('/health', (_, res) => {
 // До входа владельца ходить в банк нечем — отвечаем понятно, а не падаем.
 // /api/login исключён: это и есть вход.
 app.use((req, res, next) => {
-  if (req.path === '/health' || req.path === '/api/login' || req.method === 'OPTIONS') return next()
+  if (req.path === '/health' || req.path === '/api/login' || req.path === '/api/audit' || req.method === 'OPTIONS') return next()
   if (hasCreds()) return next()
   res.status(401).json({
     success: false,
@@ -173,6 +175,7 @@ app.post('/api/login', async (req, res) => {
   // с переменными окружения больше не с чем — и не нужно: правильность
   // проверит сам банк при входе.
   liveSession = { login, password, lastUsedAt: Date.now() }
+  audit('auth.login', 'info', { login, ip: req.ip })
 
   // Отвечаем СРАЗУ: полный заход в банк занимает 40-90 c, и сервис-воркер
   // на телефоне обрывал такой запрос по таймауту — человек видел
@@ -182,10 +185,11 @@ app.post('/api/login', async (req, res) => {
   if (!whoAmIWarming) {
     whoAmIWarming = true
     getWhoAmI(login, password)
-      .then(name => { if (name) { cachedWhoAmI = name; console.log('[login] вход выполнен:', name) } })
+      .then(name => { if (name) { cachedWhoAmI = name; console.log('[login] вход выполнен:', name); audit('auth.login', 'ok', { name }) } })
       .catch(err => {
         // Банк не пустил — держать неверный пароль в памяти незачем
         console.error('[login] вход не удался:', err.message)
+        audit('auth.login', 'error', { login, reason: err.message })
         if (liveSession?.password === password) liveSession = null
       })
       .finally(() => { whoAmIWarming = false })
@@ -372,11 +376,15 @@ app.post('/api/transfer-own', async (req, res) => {
   try {
     // Структурный API вместо кликов по форме: счета выбираются по идентификатору,
     // поэтому не бывает «счёт получателя не выбран». success = реальный итог банка.
+    audit('transfer.create', 'info', { fromAccount, toAccount, amount, purpose })
     const data = await transferOwnStructured(dbo().login, dbo().password, { fromAccount, toAccount, amount, purpose, sign: !!sign })
     invalidateCache()   // появился новый документ — список устарел
+    audit('transfer.create', data.ok !== false ? 'ok' : 'error',
+      { fromAccount, toAccount, amount, docId: data.id, error: data.error })
     res.json({ success: data.ok !== false, error: data.error || undefined, data })
   } catch (err) {
     console.error('[transfer-own]', err.message)
+    audit('transfer.create', 'error', { fromAccount, toAccount, amount, error: err.message })
     res.status(500).json({ success:false, error: err.message })
   }
 })
@@ -400,9 +408,11 @@ app.get('/api/documents', async (_, res) => {
 app.post('/api/documents/:id/sign/start', async (req, res) => {
   try {
     const data = await signStart(dbo().login, dbo().password, { id: req.params.id })
+    audit('sign.start', 'ok', { docId: req.params.id, stage: data.stage, serial: data.serial })
     res.json({ success: true, data })
   } catch (err) {
     console.error('[sign start]', err.message)
+    audit('sign.start', 'error', { docId: req.params.id, error: err.message })
     res.status(400).json({ success: false, error: err.message })
   }
 })
@@ -413,6 +423,12 @@ app.post('/api/documents/:id/sign/start', async (req, res) => {
 app.get('/api/documents/:id/sign/status', async (req, res) => {
   try {
     const data = await signStatus(dbo().login, dbo().password, { id: req.params.id })
+    // Пишем только завершение: промежуточные опросы идут раз в 5 секунд и
+    // засорили бы журнал, ничего к нему не добавляя.
+    if (data.stage === 'done' || data.stage === 'signed' || data.stage === 'error') {
+      audit('sign.finish', data.stage === 'error' ? 'error' : 'ok',
+        { docId: req.params.id, stage: data.stage, message: data.message, error: (data.errors || [])[0] })
+    }
     res.json({ success: data.stage !== 'error', data })
   } catch (err) {
     console.error('[sign status]', err.message)
@@ -426,6 +442,8 @@ app.post('/api/documents/:id/sign/sync', async (req, res) => {
   const { firstKey, secondKey } = req.body || {}
   try {
     const data = await signSyncToken(dbo().login, dbo().password, { id: req.params.id, firstKey, secondKey })
+    audit('sign.sync', data.stage === 'error' ? 'error' : 'ok',
+      { docId: req.params.id, stage: data.stage })
     invalidateCache()
     res.json({ success: data.stage !== 'error', data })
   } catch (err) {
@@ -437,7 +455,9 @@ app.post('/api/documents/:id/sign/sync', async (req, res) => {
 // Отмена подписи: гасим висящую операцию в банке, если человек закрыл окно.
 app.post('/api/documents/:id/sign/cancel', async (req, res) => {
   try {
-    res.json({ success: true, data: await signCancel(dbo().login, dbo().password, { id: req.params.id }) })
+    const data = await signCancel(dbo().login, dbo().password, { id: req.params.id })
+    audit('sign.cancel', 'ok', { docId: req.params.id })
+    res.json({ success: true, data })
   } catch (err) {
     res.status(400).json({ success: false, error: err.message })
   }
@@ -450,9 +470,13 @@ app.post('/api/documents/:id/sign/key', async (req, res) => {
   try {
     const data = await signSubmitKey(dbo().login, dbo().password, { id: req.params.id, key })
     invalidateCache()   // статус документа изменился
+    // Сам ключ в журнал не попадает — только факт ввода и итог
+    audit('sign.key', data.stage === 'error' ? 'error' : 'ok',
+      { docId: req.params.id, stage: data.stage, error: (data.errors || [])[0] })
     res.json({ success: data.stage !== 'error', data })
   } catch (err) {
     console.error('[sign key]', err.message)
+    audit('sign.key', 'error', { docId: req.params.id, error: err.message })
     res.status(400).json({ success: false, error: err.message })
   }
 })
@@ -621,6 +645,68 @@ app.post('/api/bank', async (req, res) => {
   }
 })
 
+// Выписка по счёту, подготовленная на сервере.
+//
+// Банк отдаёт операции одним списком по возрастанию даты — у этого клиента
+// почти 10 000 записей (~7 МБ). Гонять их на телефон при каждом открытии
+// выписки нельзя, поэтому тяжёлый запрос остаётся здесь: фильтруем по счёту,
+// сортируем свежими вверх и отдаём последние N.
+//
+// Параметры: account (номер счёта), limit (по умолчанию 200), from/to (YYYY-MM-DD).
+const stmtCache = { at: 0, data: null, pending: null }
+const STMT_TTL = 120000
+
+async function loadAllOperations() {
+  const now = Date.now()
+  if (stmtCache.data && now - stmtCache.at < STMT_TTL) return stmtCache.data
+  if (stmtCache.pending) return stmtCache.pending
+  stmtCache.pending = (async () => {
+    const r = await callBankApi(dbo().login, dbo().password, {
+      method: 'GET',
+      path: '/api/v1/statements/operations?_offset=0&_limit=20000',
+    })
+    const arr = Array.isArray(r.json) ? r.json : (r.json?.list || r.json?.items || [])
+    stmtCache.at = Date.now(); stmtCache.data = arr; stmtCache.pending = null
+    console.log('[statement] получено операций:', arr.length)
+    return arr
+  })().catch(e => { stmtCache.pending = null; throw e })
+  return stmtCache.pending
+}
+
+// Имя /api/statement уже занято выгрузкой файла выписки из банка,
+// поэтому список операций живёт по адресу /api/operations.
+app.get('/api/operations', async (req, res) => {
+  const account = String(req.query.account || '').replace(/\D/g, '')
+  const limit = Math.min(Number(req.query.limit) || 200, 1000)
+  const from = req.query.from || null
+  const to = req.query.to || null
+  try {
+    let ops = await loadAllOperations()
+    if (account) {
+      ops = ops.filter(o => {
+        const p = String(o.payer?.account || '').replace(/\D/g, '')
+        const r2 = String(o.receiver?.account || '').replace(/\D/g, '')
+        return p === account || r2 === account
+      })
+    }
+    if (from) ops = ops.filter(o => String(o.operationDate || '').slice(0, 10) >= from)
+    if (to) ops = ops.filter(o => String(o.operationDate || '').slice(0, 10) <= to)
+    // свежие сверху
+    ops = ops.slice().sort((a, b) => String(b.operationDate || '').localeCompare(String(a.operationDate || '')))
+    res.json({ success: true, total: ops.length, data: ops.slice(0, limit) })
+  } catch (err) {
+    console.error('[statement]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Журнал действий: что происходило, когда и чем закончилось.
+// Секретов не содержит, номера счетов маскированы.
+app.get('/api/audit', (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 200, 500)
+  res.json({ success: true, data: auditTail(limit) })
+})
+
 app.post('/api/logout', async (_, res) => {
   // Выход обязан стирать пароль из памяти, а не только закрывать браузер:
   // иначе после «выхода» сервис продолжал бы ходить в банк под владельцем.
@@ -629,6 +715,7 @@ app.post('/api/logout', async (_, res) => {
   invalidateCache()
   await closeBrowser()
   console.log('[auth] выход — пароль стёрт из памяти')
+  audit('auth.logout', 'ok', {})
   res.json({ success: true })
 })
 
