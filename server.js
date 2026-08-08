@@ -766,27 +766,34 @@ app.get('/api/operations', async (req, res) => {
     if (to) ops = ops.filter(o => String(o.operationDate || '').slice(0, 10) <= to)
     // свежие сверху
     ops = ops.slice().sort((a, b) => String(b.operationDate || '').localeCompare(String(a.operationDate || '')))
-    res.json({ success: true, total: ops.length, data: ops.slice(0, limit) })
+    // Отдаём разобранными: приложению нужны знак суммы, направление и
+    // контрагент, а не сырые поля банка. Дебет или кредит определяется
+    // наличием суммы — так же считает фронт самого банка.
+    const data = ops.slice(0, limit).map(o => {
+      const debit = !!o.debet && Number(o.debet) !== 0
+      const party = debit ? o.receiver : o.payer
+      return {
+        id: o.id,
+        date: String(o.operationDate || '').slice(0, 10),
+        number: String(o.documentNumber ?? '').trim(),
+        account: String(o.accountName ?? '').trim(),
+        purpose: String(o.paymentPurpose ?? '').trim(),
+        amount: debit ? -Math.abs(Number(o.debet) || 0) : Math.abs(Number(o.credit) || 0),
+        direction: debit ? 'out' : 'in',
+        currency: o.payerCurrIsoCode || o.receiverCurrIsoCode || 'RUR',
+        counterparty: {
+          name: String(party?.name ?? '').trim(),
+          inn: party?.inn || '',
+          account: party?.account || '',
+          bank: party?.bankName || '',
+          bic: party?.bankBic || '',
+        },
+        status: 'Исполнен',
+      }
+    })
+    res.json({ success: true, total: ops.length, data })
   } catch (err) {
     console.error('[statement]', err.message)
-    res.status(500).json({ success: false, error: err.message })
-  }
-})
-
-// Операции по ВСЕМ счетам за период. Выписка через doc/statements/byPeriod
-// отдаёт только обороты по счёту, поэтому история приходила лишь по одному
-// счёту — здесь настоящие операции по всем.
-app.get('/api/operations', async (req, res) => {
-  const { dateFrom, dateTo, limit } = req.query
-  try {
-    const key = `operations:${dateFrom || ''}:${dateTo || ''}:${limit || ''}`
-    const data = await cached(key, CACHE_TTL_MS, () =>
-      getOperations(dbo().login, dbo().password, {
-        dateFrom, dateTo, limit: Math.min(Number(limit) || 200, 500),
-      }))
-    res.json({ success: true, data })
-  } catch (err) {
-    console.error('[operations]', err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })
@@ -892,6 +899,98 @@ app.post('/api/mail/:id/read', async (req, res) => {
 app.get('/api/audit', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 200, 500)
   res.json({ success: true, data: auditTail(limit) })
+})
+
+// Раздел банка по пункту меню.
+//
+// Часть разделов (тарифы, депозиты, кредиты) живёт не в REST, а в командном
+// протоколе: банк отдаёт модель формы, а данные лежат в её полях-гридах.
+// Настоящие идентификаторы пунктов берутся из GET /api/v1/menu — угадывать их
+// по исходникам фронта нельзя, у этого клиента они другие.
+//
+// Возвращаем нормализованный вид: {title, grids: {поле: [строки]}, selects: {...}}.
+app.get('/api/form', async (req, res) => {
+  const menuItem = String(req.query.menuItem || '').trim()
+  if (!menuItem) return res.status(400).json({ success: false, error: 'не указан menuItem' })
+  try {
+    const data = await cached('form:' + menuItem, CACHE_TTL_MS, async () => {
+      const r = await callBankApi(dbo().login, dbo().password, {
+        method: 'POST', path: '/api/v1/menu/click', body: { menuItem },
+      })
+      const cmds = r.json?.commands || []
+
+      const err = cmds.find(c => /errorDialog/.test(c.instanceName || ''))
+      if (err) {
+        const msg = err.fields?.message?.value || err.fields?.message || 'раздел недоступен'
+        throw new Error(String(msg))
+      }
+
+      // Разворачиваем поля вида {value: …} в простые значения
+      const plain = (v) => (v && typeof v === 'object' && !Array.isArray(v) && 'value' in v) ? v.value : v
+      const flat = (row) => {
+        const out = {}
+        for (const [k, v] of Object.entries(row || {})) {
+          const val = plain(v)
+          if (val === null || val === undefined || typeof val === 'object') continue
+          out[k] = val
+        }
+        return out
+      }
+
+      const forms = cmds.filter(c => c.command === 'formInit')
+      const grids = {}
+      const selects = {}
+      const extras = {}
+      let title = ''
+
+      for (const f of forms) {
+        if (f.title && !title) title = f.title
+        for (const [id, field] of Object.entries(f.fields || {})) {
+          const items = field?.items || (Array.isArray(field?.value) ? field.value : null)
+          if (!Array.isArray(items) || items.length === 0) continue
+          const rows = items.map(it => {
+            const base = flat(it)
+            // Особенности тарифа приходят отдельным списком пар
+            if (Array.isArray(it.addProps)) {
+              base._props = it.addProps
+                .map(p => ({ label: String(p.label || '').trim(), value: String(p.value || '').trim() }))
+                .filter(p => p.label || p.value)
+            }
+            return base
+          })
+          if (field.type === 'select') selects[id] = rows
+          else if (field.type === 'grid' || field.type === 'lines') grids[id] = rows
+          else extras[id] = rows
+        }
+      }
+      return { title, grids, selects, extras }
+    })
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[form]', menuItem, err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Меню банка целиком — с настоящими идентификаторами разделов.
+app.get('/api/menu', async (_req, res) => {
+  try {
+    const data = await cached('menu', 10 * 60 * 1000, async () => {
+      const r = await callBankApi(dbo().login, dbo().password, { method: 'GET', path: '/api/v1/menu' })
+      const found = []
+      const walk = (n) => {
+        if (!n || typeof n !== 'object') return
+        if (Array.isArray(n)) return n.forEach(walk)
+        if (n.id && (n.label || n.name)) found.push({ id: n.id, label: n.label || n.name })
+        Object.values(n).forEach(walk)
+      }
+      walk(r.json)
+      return found
+    })
+    res.json({ success: true, data })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
 })
 
 app.post('/api/logout', async (req, res) => {
