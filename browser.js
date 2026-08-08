@@ -1518,166 +1518,218 @@ async function submitPayment(username, password, paymentData) {
   }
 }
 
-// by: 'account' — выписка по счёту (по умолчанию), 'contractor' — по контрагенту
-async function downloadStatement(username, password, { account = '', dateFrom, dateTo, format = 'pdf', reportForm = '1', by = 'account' }) {
-  const fs = require('fs')
-  const path = require('path')
-  const os = require('os')
+// Выписка за период — через REST банка, тот же путь, что у веб-версии.
+//
+// Раньше файл добывался разбором старого интерфейса: искалась кнопка по тексту
+// среди `button, a` и ожидалось событие загрузки. Банк рисует эту кнопку иначе,
+// клик не происходил, и всё падало по «Timeout 25000ms waiting for download».
+//
+// Настоящий порядок (сверено с исходниками d2sme, app/forms/StatementPrint):
+//   1) menu/click «Счета и платежи» → форма ui/account с гридом счетов;
+//   2) doAction statement_accounts (или partnerStatement_accounts — выписка
+//      по контрагенту) → открывается форма ui/ui/statements/print;
+//   3) счета задаются НЕ строкой, а выбором в отдельном окне: doAction
+//      selectAccounts → в ui/account/accountsSelector ставим value самого
+//      поля-грида массивом id (так BSS отмечает строки) → doAction select.
+//      Без этого банк отвечает «Счета не заданы»;
+//   4) поля отправляются ПО ОДНОМУ, каждое своим submitField: смена
+//      datePeriod пересчитывает даты на сервере и затирает переданные вместе
+//      с ней fromDate/toDate;
+//   5) doAction print_report → команда fileDownload с fileId;
+//   6) файл забирается GET /api/v1/fileDownload?fileId=…
+//
+// Всё это только чтение: печать выписки ничего в банке не создаёт.
 
-  const p = await ensureLoggedIn(username, password)
+// Формы отчёта: наши коды → коды банка
+const STMT_FORMS = { '1': 'form1', '1a': 'form11', '2': 'form2', '3': 'form3', '4': 'form4' }
+const STMT_FORMATS = { pdf: 'pdf', xls: 'xls', xlsx: 'xls' }
 
-  // Dismiss modal
-  await p.evaluate(() => {
-    const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
-    if (modal) {
-      const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
-      const last = btns[btns.length - 1]
-      if (last) last.click(); else modal.remove()
-    }
-  })
-  await p.waitForTimeout(800)
-
-  // Navigate to statement section
-  try { await p.click('text=Счета и платежи', { timeout: 5000 }); await p.waitForTimeout(2000) } catch (e) {
-    console.log('[statement] nav1 fail:', e.message)
-  }
-  try { await p.click('text=Выписка', { timeout: 5000 }); await p.waitForTimeout(2000) } catch (e) {
-    console.log('[statement] nav2 fail:', e.message)
-  }
-
-  // Кнопка «Выписка» раскрывает меню: по счёту / по контрагенту / экспорт.
-  // Без явного выбора банк открывает выписку по счёту.
-  if (by === 'contractor') {
-    const picked = await p.evaluate(() => {
-      const els = Array.from(document.querySelectorAll('div,span,li,button,a,[role="menuitem"]'))
-      const el = els.find(e => (e.textContent || '').trim() === 'Выписка по контрагенту')
-      if (!el) return false
-      el.click()
-      return true
+/** Скачать файл банка по fileId. Возвращает Buffer и имя из заголовка. */
+async function bankFile(p, fileId) {
+  if (!sessionAuthToken) throw new Error('токен сессии банка не пойман')
+  const res = await p.evaluate(async ([id, t]) => {
+    const r = await fetch('https://dbo.centrinvest.ru/api/v1/fileDownload?fileId=' + encodeURIComponent(id), {
+      credentials: 'include',
+      headers: { authToken: t, Accept: '*/*' },
     })
-    console.log('[statement] выписка по контрагенту:', picked ? 'выбрана' : 'пункт не найден')
-    await p.waitForTimeout(1500)
-  }
-
-  console.log('[statement] URL after nav:', p.url())
-
-  // Set date range via DOM evaluation
-  if (dateFrom || dateTo) {
-    await p.evaluate(({ from, to }) => {
-      const allInputs = Array.from(document.querySelectorAll('input'))
-      const dateInputs = allInputs.filter(i =>
-        i.type === 'date' ||
-        /дата|date|от|по|нач|кон/i.test(i.placeholder || '') ||
-        /дата|date|от|по|нач|кон/i.test((i.closest('label,div')?.textContent || ''))
-      )
-      const setVal = (el, val) => {
-        if (!el || !val) return
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-        if (nativeInputValueSetter) nativeInputValueSetter.call(el, val)
-        else el.value = val
-        el.dispatchEvent(new Event('input', { bubbles: true }))
-        el.dispatchEvent(new Event('change', { bubbles: true }))
-      }
-      if (dateInputs[0] && from) setVal(dateInputs[0], from)
-      if (dateInputs[1] && to) setVal(dateInputs[1], to)
-    }, { from: dateFrom, to: dateTo })
-    await p.waitForTimeout(500)
-  }
-
-  // Форма отчёта. В окне выписки банк предлагает пять вариантов, и от выбора
-  // зависит содержимое файла: обычная выписка, с приложениями, расширенная,
-  // сводная, операции по расчётному счёту. Выбираем до формата: смена формы
-  // перерисовывает окно и сбрасывает ранее выбранный формат.
-  const FORM_LABELS = {
-    '1': 'Форма 1 (Обычная выписка)',
-    '1a': 'Форма 1 (Обычная выписка с приложениями)',
-    '2': 'Форма 2 (Расширенная выписка)',
-    '3': 'Форма 3 (Сводная выписка)',
-    '4': 'Форма 4 (Операции по расчетному счету)',
-  }
-  const pickFromDropdown = async (currentText, wantedText) => {
-    // Сначала раскрываем список: без этого пункты не отрисованы в DOM
-    const opened = await p.evaluate((cur) => {
-      const els = Array.from(document.querySelectorAll('div,span,button,[role="button"],[role="combobox"]'))
-      const el = els.find(e => (e.textContent || '').trim() === cur)
-      if (!el) return false
-      const clickable = el.closest('[role="combobox"],[class*="select"],[class*="Select"]') || el
-      clickable.click()
-      return true
-    }, currentText)
-    if (!opened) return false
-    await p.waitForTimeout(400)
-    return p.evaluate((want) => {
-      const els = Array.from(document.querySelectorAll('div,span,li,button,[role="option"],[role="menuitem"],option'))
-      const el = els.find(e => (e.textContent || '').trim() === want)
-      if (!el) return false
-      el.click()
-      return true
-    }, wantedText)
-  }
-
-  if (reportForm && FORM_LABELS[reportForm] && reportForm !== '1') {
-    const ok = await pickFromDropdown(FORM_LABELS['1'], FORM_LABELS[reportForm])
-    console.log('[statement] форма отчёта', reportForm, ok ? 'выбрана' : 'не выбрана (оставлена Форма 1)')
-    await p.waitForTimeout(500)
-  }
-
-  // Формат файла — тем же способом, через раскрытие списка
-  const fmtLabels = { pdf: 'PDF', xls: 'XLS', xlsx: 'XLS', csv: 'CSV', '1c': '1С' }
-  const targetLabel = fmtLabels[format] || 'PDF'
-  if (targetLabel !== 'PDF') {
-    await pickFromDropdown('PDF', targetLabel)
-  }
-  await p.evaluate((lbl) => {
-    const els = Array.from(document.querySelectorAll('button, [role="option"], [role="menuitem"], option, label, span'))
-    for (const el of els) {
-      const t = (el.textContent || '').trim()
-      if (t === lbl || t.toUpperCase() === lbl.toUpperCase()) { el.click(); return true }
+    const buf = await r.arrayBuffer()
+    // Переводим в base64 кусками: длинные массивы в apply не помещаются
+    const bytes = new Uint8Array(buf)
+    let bin = ''
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
     }
-    return false
-  }, targetLabel)
-  await p.waitForTimeout(300)
+    return {
+      status: r.status,
+      type: r.headers.get('content-type') || '',
+      disposition: r.headers.get('content-disposition') || '',
+      b64: btoa(bin),
+    }
+  }, [fileId, sessionAuthToken])
 
-  // Find and click the download button, capture the file
-  const dlDir = os.tmpdir()
-  await p.context().route('**', route => route.continue())
+  if (res.status !== 200) throw new Error(`банк не отдал файл (код ${res.status})`)
+  const buffer = Buffer.from(res.b64, 'base64')
+  if (!buffer.length) throw new Error('банк вернул пустой файл')
+  // Имя файла: сначала RFC 5987 (filename*=UTF-8''…), затем обычное
+  const m = /filename\*=UTF-8''([^;]+)/i.exec(res.disposition) || /filename="?([^";]+)"?/i.exec(res.disposition)
+  const name = m ? decodeURIComponent(m[1].trim()) : ''
+  return { buffer, name, contentType: res.type }
+}
 
-  let downloadPath = null
-  let suggestedFilename = `statement_${dateFrom || 'all'}_${dateTo || 'all'}.${format}`
+async function downloadStatement(username, password, { account = '', dateFrom, dateTo, format = 'pdf', reportForm = '1', by = 'account', partner = '' }) {
+  const p = await ensureLoggedIn(username, password)
+  await waitForAppReady(p, 45000)
+  const log = (...a) => console.log('[statement]', ...a)
 
-  // Try using Playwright download event
-  try {
-    const [download] = await Promise.all([
-      p.waitForEvent('download', { timeout: 25000 }),
-      p.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button, a'))
-        const btn = btns.find(b => /скачат|выгруз|экспорт|download|print/i.test(b.textContent || b.title || ''))
-        if (btn) { btn.click(); return (btn.textContent || '').trim() }
-        return null
-      })
-    ])
-    const tmpPath = path.join(dlDir, `statement_${Date.now()}.tmp`)
-    await download.saveAs(tmpPath)
-    suggestedFilename = download.suggestedFilename() || suggestedFilename
-    downloadPath = tmpPath
-    console.log('[statement] Downloaded via event:', suggestedFilename, 'size:', fs.statSync(tmpPath).size)
-  } catch (e) {
-    console.log('[statement] Download event failed:', e.message)
-    // Fallback: intercept via network response
-    throw new Error('Кнопка скачивания не найдена или загрузка не запустилась: ' + e.message)
+  const cmdsOf = (r) => r?.json?.commands || []
+  const lastForm = (cmds, name) => [...cmds].reverse()
+    .find(c => c.command === 'formInit' && c.instanceName === name)
+  const tokenOf = (cmds, name, fallback) => {
+    let t = fallback
+    for (const c of cmds) if (c.instanceName === name && c.instanceToken) t = c.instanceToken
+    return t
+  }
+  const dialogOf = (cmds) => cmds.find(c => /confirmDialog/.test(c.instanceName || ''))
+  const errorOf = (cmds) => cmds.find(c => /errorDialog/.test(c.instanceName || ''))
+  const msgOf = (c) => {
+    const m = c?.fields?.message || c?.fields?.text
+    const v = m && typeof m === 'object' ? m.value : m
+    return String(v || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
   }
 
-  const buffer = fs.readFileSync(downloadPath)
-  try { fs.unlinkSync(downloadPath) } catch {}
+  // 1. Форма счетов
+  const open = await bankApi(p, 'POST', '/api/v1/menu/click', { menuItem: 'corporate-api-menu-small-accounts-and-payments' })
+  const accForm = lastForm(cmdsOf(open), 'ui/account')
+  if (!accForm) throw new Error('банк не открыл раздел счетов')
+
+  const rows = accForm.fields?.accounts?.items || []
+  const want = String(account || '').replace(/\s/g, '')
+  // Пустой account — строка «Все счета»: она идёт первой и без номера
+  const row = want
+    ? rows.find(r => String(r.account || '').replace(/\s/g, '') === want)
+    : rows.find(r => !r.account) || rows[0]
+  if (!row) throw new Error(`счёт ${account} не найден в банке`)
+
+  // 2. Открываем окно печати выписки
+  const action = by === 'contractor' ? 'partnerStatement_accounts' : 'statement_accounts'
+  const opened = await bankApi(p, 'PUT', '/api/v1/ui/account/doAction', {
+    instanceToken: accForm.instanceToken, actionId: action, rowId: row.id, ids: [row.id],
+  })
+  const openedCmds = cmdsOf(opened)
+  const form = lastForm(openedCmds, 'ui/ui/statements/print')
+    || lastForm(openedCmds, 'ui/ui/statements/print/partner')
+    || [...openedCmds].reverse().find(c => c.command === 'formInit' && /statements\/print/.test(c.instanceName || ''))
+  if (!form) {
+    const e = errorOf(openedCmds)
+    throw new Error(e ? msgOf(e) : 'банк не открыл окно печати выписки')
+  }
+  const FORM = form.instanceName
+  let token = form.instanceToken
+
+  // 3. Счета — через окно выбора, иначе «Счета не заданы»
+  if (row.account) {
+    const sel = await bankApi(p, 'PUT', `/api/v1/${FORM}/doAction`, { instanceToken: token, actionId: 'selectAccounts' })
+    const selCmds = cmdsOf(sel)
+    const selForm = lastForm(selCmds, 'ui/account/accountsSelector')
+    if (selForm) {
+      const pick = (selForm.fields?.accounts?.items || [])
+        .find(x => String(x.account || '').replace(/\s/g, '') === String(row.account).replace(/\s/g, ''))
+      if (pick) {
+        const marked = await bankApi(p, 'PUT', '/api/v1/ui/account/accountsSelector/stateUpdate', {
+          instanceToken: selForm.instanceToken, submitField: 'accounts', fields: { accounts: { value: [pick.id] } },
+        })
+        const stok = tokenOf(cmdsOf(marked), 'ui/account/accountsSelector', selForm.instanceToken)
+        const done = await bankApi(p, 'PUT', '/api/v1/ui/account/accountsSelector/doAction', {
+          instanceToken: stok, actionId: 'select',
+        })
+        token = tokenOf(cmdsOf(done), FORM, token)
+      } else {
+        log('счёт не найден в окне выбора:', row.account)
+      }
+    }
+  }
+
+  // 3а. Контрагент — обязателен для выписки по контрагенту: без него банк
+  // строит пустой отчёт и файла не отдаёт вовсе. Ищем по ИНН, счёту или
+  // части названия — приложение передаёт то, что у него есть.
+  if (by === 'contractor') {
+    if (!partner) throw new Error('для выписки по контрагенту нужно выбрать контрагента')
+    const sp = await bankApi(p, 'PUT', `/api/v1/${FORM}/doAction`, { instanceToken: token, actionId: 'selectPartner' })
+    const picker = lastForm(cmdsOf(sp), 'ui/partner/selector')
+    if (!picker) throw new Error('банк не открыл список контрагентов')
+    const norm = (s) => String(s || '').replace(/\s/g, '').toLowerCase()
+    const key = norm(partner)
+    const list = picker.fields?.partners?.items || []
+    const hit = list.find(x => norm(x.inn) === key || norm(x.account) === key)
+      || list.find(x => norm(x.name).includes(key))
+    if (!hit) throw new Error(`контрагент «${partner}» не найден в справочнике банка`)
+    const marked = await bankApi(p, 'PUT', '/api/v1/ui/partner/selector/stateUpdate', {
+      instanceToken: picker.instanceToken, submitField: 'partners', fields: { partners: { value: [hit.id] } },
+    })
+    const ptok = tokenOf(cmdsOf(marked), 'ui/partner/selector', picker.instanceToken)
+    const done = await bankApi(p, 'PUT', '/api/v1/ui/partner/selector/doAction', { instanceToken: ptok, actionId: 'ok' })
+    token = tokenOf(cmdsOf(done), FORM, token)
+    log('контрагент:', hit.name, hit.inn)
+  }
+
+  // 4. Параметры отчёта — по одному полю за запрос
+  const setField = async (id, value) => {
+    const r = await bankApi(p, 'PUT', `/api/v1/${FORM}/stateUpdate`, {
+      instanceToken: token, submitField: id, fields: { [id]: { value } },
+    })
+    token = tokenOf(cmdsOf(r), FORM, token)
+  }
+  if (dateFrom || dateTo) {
+    await setField('datePeriod', 'period')
+    if (dateFrom) await setField('fromDate', dateFrom)
+    if (dateTo) await setField('toDate', dateTo)
+  }
+  const bankForm = STMT_FORMS[String(reportForm)] || 'form1'
+  await setField('reportForm', bankForm)
+  await setField('reportFormat', STMT_FORMATS[String(format).toLowerCase()] || 'pdf')
+
+  // 5. Построение отчёта
+  let cmds = cmdsOf(await bankApi(p, 'PUT', `/api/v1/${FORM}/doAction`, { instanceToken: token, actionId: 'print_report' }))
+
+  // Банк может спросить, строить ли отчёт при неполных данных за период.
+  // Отвечаем «да» только на этот вопрос — он про построение отчёта, а не про
+  // заказ выписок, и печать ничего в банке не создаёт. Текст пишем в журнал.
+  for (let i = 0; i < 2; i++) {
+    const dlg = dialogOf(cmds)
+    if (!dlg) break
+    const question = msgOf(dlg)
+    if (!/продолжить построение/i.test(question)) {
+      log('банк задал неожиданный вопрос, не отвечаю:', question)
+      throw new Error(question || 'банк запросил подтверждение, которого мы не ожидали')
+    }
+    log('банк:', question)
+    cmds = cmdsOf(await bankApi(p, 'PUT', `/api/v1/${dlg.instanceName}/doAction`, {
+      instanceToken: dlg.instanceToken, actionId: '_yes',
+    }))
+  }
+
+  const err = errorOf(cmds)
+  if (err) throw new Error(msgOf(err) || 'банк не построил выписку')
+
+  const file = cmds.find(c => c.command === 'fileDownload' && c.fileId)
+  if (!file) throw new Error('банк не вернул файл выписки')
+
+  // 6. Забираем файл
+  const got = await bankFile(p, file.fileId)
+  const fallbackName = `Выписка_${dateFrom || ''}_${dateTo || ''}.${format === 'xls' ? 'xls' : 'pdf'}`
+  const filename = file.fileName || got.name || fallbackName
+  log('файл получен:', filename, got.buffer.length, 'байт')
 
   const mimeTypes = {
-    pdf:  'application/pdf',
+    pdf: 'application/pdf',
+    xls: 'application/vnd.ms-excel',
     xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    csv:  'text/csv; charset=utf-8',
-    '1c': 'text/plain; charset=windows-1251',
   }
-
-  return { buffer, filename: suggestedFilename, mimeType: mimeTypes[format] || 'application/octet-stream' }
+  return {
+    buffer: got.buffer,
+    filename,
+    mimeType: got.contentType || mimeTypes[String(format).toLowerCase()] || 'application/octet-stream',
+  }
 }
 
 // Реальные тарифы/лимиты: открываем экран «Продукты → Тарифы» и вынимаем поля label→value.
@@ -2229,6 +2281,40 @@ async function getMailCounters(username, password, { orgId } = {}) {
   const forSign = Object.values(outgoing)[0] ?? 0
   console.log('[mail] непрочитанных:', unread, '| на подпись:', forSign)
   return { unread, forSign, news: incoming.news ?? 0 }
+}
+
+/**
+ * Удалить документы. Банк принимает список, поэтому годится и для одной
+ * платёжки, и для чистки накопившихся черновиков.
+ *
+ * ПРЕДОХРАНИТЕЛЬ: удаляем только то, что банк сам разрешает удалить
+ * (canDoAction '_delete'). Исполненный или отправленный документ так не
+ * пропадёт — банк откажет, а мы скажем об этом честно, а не промолчим.
+ */
+async function deleteDocuments(username, password, { ids, module = SIGN_MODULE }) {
+  if (!ids || !ids.length) throw new Error('не переданы документы')
+  const p = await ensureLoggedIn(username, password)
+
+  const allowed = []
+  const refused = []
+  for (const id of ids) {
+    try {
+      if (await docCanDo(p, module, id, '_delete')) allowed.push(String(id))
+      else refused.push(String(id))
+    } catch {
+      refused.push(String(id))
+    }
+  }
+  if (!allowed.length) {
+    return { ok: false, deleted: 0, refused: refused.length,
+      error: 'Банк не разрешает удалить эти документы — вероятно, они уже отправлены' }
+  }
+
+  const r = await bankApi(p, 'PUT', `/api/v1/${module}/list/delete`, { ids: allowed })
+  const d = r.json?.data || r.json
+  console.log('[delete] удалено:', allowed.length, '| отказано:', refused.length,
+    '| ответ:', JSON.stringify(d).slice(0, 200))
+  return { ok: true, deleted: allowed.length, refused: refused.length, raw: d }
 }
 
 /**
@@ -3774,4 +3860,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }

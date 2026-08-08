@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, getPartners, getBics, callBankApi } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi } = require('./browser')
 const { audit, auditTail, maskAccount } = require('./audit')
 const { getAcquiring } = require('./acquiring')
 const { prepareTariffChange, signTariffChange } = require('./tariff')
@@ -664,9 +664,10 @@ app.get('/debug/accounts-dom', async (req, res) => {
 app.get('/api/statement', async (req, res) => {
   // reportForm — форма отчёта банка (1, 1a, 2, 3, 4): от неё зависит содержимое файла
   // by=account|contractor — выписка по счёту или по контрагенту
-  const { account = '', dateFrom, dateTo, format = 'pdf', reportForm = '1', by = 'account' } = req.query
+  // partner — контрагент для by=contractor: ИНН, счёт или часть названия
+  const { account = '', dateFrom, dateTo, format = 'pdf', reportForm = '1', by = 'account', partner = '' } = req.query
   try {
-    const { buffer, filename, mimeType } = await downloadStatement(dbo().login, dbo().password, { account, dateFrom, dateTo, format, reportForm, by })
+    const { buffer, filename, mimeType } = await downloadStatement(dbo().login, dbo().password, { account, dateFrom, dateTo, format, reportForm, by, partner })
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`)
     res.setHeader('Content-Type', mimeType)
     res.setHeader('Content-Length', buffer.length)
@@ -870,6 +871,25 @@ app.get('/api/documents/:id/print', async (req, res) => {
   } catch (err) {
     console.error('[print]', err.message)
     audit('doc.print', 'error', { docId: req.params.id, error: err.message })
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Удаление документов. Удаляется только то, что банк сам разрешает удалить:
+// отправленный или исполненный документ так не пропадёт.
+app.post('/api/documents/delete', async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : []
+  if (!ids.length) return res.status(400).json({ success: false, error: 'не переданы документы' })
+  try {
+    audit('doc.delete', 'info', { count: ids.length })
+    const data = await deleteDocuments(dbo().login, dbo().password, { ids })
+    invalidateCache()
+    audit('doc.delete', data.ok ? 'ok' : 'error',
+      { deleted: data.deleted, refused: data.refused, error: data.error })
+    res.json({ success: !!data.ok, error: data.error || undefined, data })
+  } catch (err) {
+    console.error('[delete]', err.message)
+    audit('doc.delete', 'error', { error: err.message })
     res.status(500).json({ success: false, error: err.message })
   }
 })
