@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi, getBanners, getBannerImage } = require('./browser')
 const { audit, auditTail, maskAccount } = require('./audit')
 const { getAcquiring } = require('./acquiring')
 const { prepareTariffChange, signTariffChange } = require('./tariff')
@@ -1194,6 +1194,43 @@ app.post('/api/tariff/sign', async (req, res) => {
   } catch (err) {
     console.error('[tariff sign]', err.message)
     audit('tariff.sign', 'error', { reason: err.message })
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Баннеры главной — те же плашки, что банк показывает в веб-версии.
+//
+// Картинки лежат на хосте банка, и приложение не может взять их оттуда само:
+// оно на другом домене, а контур закрыт ГОСТ-TLS. Поэтому список отдаём JSON'ом,
+// а сами картинки — своим маршрутом ниже.
+app.get('/api/banners', async (_req, res) => {
+  try {
+    const data = await cached('banners', 10 * 60 * 1000, () => getBanners(dbo().login, dbo().password))
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[banners]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Картинка баннера. Меняется редко — держим в памяти час и разрешаем кэш
+// на устройстве, чтобы главная не тянула по 200 КБ при каждом открытии.
+const bannerImages = new Map()
+app.get('/api/banners/:id/image', async (req, res) => {
+  const id = String(req.params.id || '')
+  try {
+    let hit = bannerImages.get(id)
+    if (!hit || Date.now() - hit.at > 60 * 60 * 1000) {
+      const got = await getBannerImage(dbo().login, dbo().password, id)
+      hit = { at: Date.now(), ...got }
+      bannerImages.set(id, hit)
+    }
+    res.setHeader('Content-Type', hit.contentType)
+    res.setHeader('Cache-Control', 'private, max-age=3600')
+    res.setHeader('Content-Length', hit.buffer.length)
+    res.send(hit.buffer)
+  } catch (err) {
+    console.error('[banner image]', err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })

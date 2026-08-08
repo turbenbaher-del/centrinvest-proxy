@@ -1544,11 +1544,14 @@ async function submitPayment(username, password, paymentData) {
 const STMT_FORMS = { '1': 'form1', '1a': 'form11', '2': 'form2', '3': 'form3', '4': 'form4' }
 const STMT_FORMATS = { pdf: 'pdf', xls: 'xls', xlsx: 'xls' }
 
-/** Скачать файл банка по fileId. Возвращает Buffer и имя из заголовка. */
-async function bankFile(p, fileId) {
+/**
+ * Двоичный ответ банка (файлы, картинки) по произвольному пути /api/v1/….
+ * JSON-мост тут не годится: он разбирает ответ как JSON и портит байты.
+ */
+async function bankBinary(p, path) {
   if (!sessionAuthToken) throw new Error('токен сессии банка не пойман')
-  const res = await p.evaluate(async ([id, t]) => {
-    const r = await fetch('https://dbo.centrinvest.ru/api/v1/fileDownload?fileId=' + encodeURIComponent(id), {
+  const res = await p.evaluate(async ([u, t]) => {
+    const r = await fetch('https://dbo.centrinvest.ru' + u, {
       credentials: 'include',
       headers: { authToken: t, Accept: '*/*' },
     })
@@ -1565,7 +1568,7 @@ async function bankFile(p, fileId) {
       disposition: r.headers.get('content-disposition') || '',
       b64: btoa(bin),
     }
-  }, [fileId, sessionAuthToken])
+  }, [path, sessionAuthToken])
 
   if (res.status !== 200) throw new Error(`банк не отдал файл (код ${res.status})`)
   const buffer = Buffer.from(res.b64, 'base64')
@@ -1574,6 +1577,51 @@ async function bankFile(p, fileId) {
   const m = /filename\*=UTF-8''([^;]+)/i.exec(res.disposition) || /filename="?([^";]+)"?/i.exec(res.disposition)
   const name = m ? decodeURIComponent(m[1].trim()) : ''
   return { buffer, name, contentType: res.type }
+}
+
+/** Файл банка по fileId — та же ручка, что у веб-версии при скачивании. */
+const bankFile = (p, fileId) =>
+  bankBinary(p, '/api/v1/fileDownload?fileId=' + encodeURIComponent(fileId))
+
+/**
+ * Баннеры главной страницы — те самые плашки «Депозиты», «АУСН» и прочие,
+ * которые банк показывает в веб-версии. Список приходит обычным REST,
+ * а картинки лежат отдельными файлами и тянутся по fileId.
+ *
+ * Приложение не может взять их с хоста банка напрямую: оно живёт на другом
+ * домене, а контур закрыт ГОСТ-TLS — поэтому картинки отдаём через себя.
+ */
+async function getBanners(username, password) {
+  const p = await ensureLoggedIn(username, password)
+  await waitForAppReady(p, 45000)
+  const r = await bankApi(p, 'GET', '/api/v1/banner/list?_offset=0&_limit=50')
+  const list = Array.isArray(r.json) ? r.json : (r.json?.list || r.json?.items || [])
+  return list
+    .map(b => ({
+      id: String(b.id || ''),
+      title: String(b.title || b.name || '').trim(),
+      text: String(b.text || b.description || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+      // Куда ведёт «Подробнее». Внутренние переходы банка мы не повторяем —
+      // отдаём только внешние ссылки, остальное просто показываем картинкой.
+      link: b.offerType === 'EXTERNAL_LINK' ? String(b.externalLink || '') : '',
+      linkLabel: String(b.moreInfoActionName || '').trim(),
+      bgColor: String(b.bgColor || ''),
+      priority: Number(b.priority) || 0,
+      // fileId картинки: в веб-версии её тянут по image.id
+      imageId: String(b.image?.id || b.image?.fileId || ''),
+      contentType: String(b.image?.contentType || ''),
+    }))
+    .filter(b => b.imageId)
+    .sort((a, b) => a.priority - b.priority)
+}
+
+/** Картинка баннера. Отдаём байты как есть — приложение покажет их сразу. */
+async function getBannerImage(username, password, imageId) {
+  if (!imageId) throw new Error('не указан идентификатор картинки')
+  const p = await ensureLoggedIn(username, password)
+  await waitForAppReady(p, 45000)
+  const got = await bankBinary(p, `/api/v1/filesDownload?fileId=${encodeURIComponent(imageId)}&saved=true`)
+  return { buffer: got.buffer, contentType: got.contentType || 'image/png' }
 }
 
 async function downloadStatement(username, password, { account = '', dateFrom, dateTo, format = 'pdf', reportForm = '1', by = 'account', partner = '' }) {
@@ -3867,4 +3915,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi, getBanners, getBannerImage }
