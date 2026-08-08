@@ -2004,6 +2004,7 @@ async function getOperations(username, password, { dateFrom, dateTo, accounts, o
     sort: ['operationDate-', 'documentNumber-', 'id-'],
   })
   console.log('[operations] получено операций:', list.length)
+  if (list[0]) console.log('[operations] поля записи:', Object.keys(list[0]).join(', '))
 
   // Дебет или кредит определяется наличием суммы — так же считает фронт банка
   return list.map(o => {
