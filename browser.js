@@ -2094,12 +2094,23 @@ async function markMailRead(username, password, { box = 'in', id, read = true })
 async function getMailCounters(username, password, { orgId } = {}) {
   const p = await ensureLoggedIn(username, password)
   // Банк отдаёт массив пар «имя счётчика — значение»; сворачиваем в объект
+  // Банк отдаёт счётчики в двух видах: массивом пар {name, value} либо ОДНОЙ
+  // такой парой. Второй случай я пропустил — и в приложение уходило имя
+  // счётчика вместо числа («income» вместо 3).
   const toCount = (json) => {
     const raw = json?.data ?? json
     if (Array.isArray(raw)) {
       return raw.reduce((acc, x) => ({ ...acc, [x.name]: Number(x.value) || 0 }), {})
     }
-    return raw && typeof raw === 'object' ? raw : {}
+    if (raw && typeof raw === 'object') {
+      if ('name' in raw && 'value' in raw) return { [raw.name]: Number(raw.value) || 0 }
+      // Уже готовый объект вида {income: 3} — оставляем только числа
+      return Object.fromEntries(
+        Object.entries(raw)
+          .filter(([, v]) => v !== null && v !== '' && !Number.isNaN(Number(v)))
+          .map(([k, v]) => [k, Number(v)]))
+    }
+    return {}
   }
   const qs = orgId ? `?orgId=${encodeURIComponent(orgId)}&currControlMessages=false` : '?currControlMessages=false'
   const [inc, out] = await Promise.all([
