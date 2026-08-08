@@ -16,9 +16,10 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getPartners, getBics, callBankApi } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, getPartners, getBics, callBankApi } = require('./browser')
 const { audit, auditTail, maskAccount } = require('./audit')
 const { getAcquiring } = require('./acquiring')
+const { prepareTariffChange, signTariffChange } = require('./tariff')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -873,6 +874,18 @@ app.get('/api/documents/:id/print', async (req, res) => {
   }
 })
 
+// Полные реквизиты счёта одним запросом — их постоянно просят контрагенты
+app.get('/api/requisites', async (req, res) => {
+  try {
+    const data = await cached(`requisites:${req.query.account || ''}`, CACHE_TTL_MS, () =>
+      getRequisites(dbo().login, dbo().password, { account: req.query.account }))
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[requisites]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
 // Справочник контрагентов банка — реквизиты подставляются, а не вводятся руками
 app.get('/api/partners', async (req, res) => {
   try {
@@ -1121,6 +1134,46 @@ app.get('/api/acquiring/:key', async (req, res) => {
     res.json({ success: true, data })
   } catch (err) {
     console.error('[acquiring]', key, err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Смена тарифного плана.
+//
+// Шаг 1 (без confirm) — только показать предупреждение банка: в банке при этом
+// ничего не создаётся. Шаг 2 (confirm) — открыть заявление и показать, что
+// именно в нём. Ни тот, ни другой ничего не подписывают.
+app.post('/api/tariff/change', async (req, res) => {
+  const { tariffId, confirm = false } = req.body || {}
+  try {
+    const data = await prepareTariffChange(dbo(), { tariffId, confirm: !!confirm })
+    audit('tariff.prepare', 'ok', { plan: data.plan?.name, stage: data.stage })
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[tariff]', err.message)
+    audit('tariff.prepare', 'error', { reason: err.message })
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Подпись заявления на смену тарифа.
+//
+// Это шаг, меняющий условия обслуживания: заявление сохраняется и уходит в
+// подпись одним действием банка, отдельного «сохранить» у формы нет. Поэтому
+// маршрут вызывается только по явному действию человека в приложении, и каждый
+// вызов записывается в журнал — включая неудачные.
+app.post('/api/tariff/sign', async (req, res) => {
+  const { tariffId } = req.body || {}
+  const who = shortAgent(req.get('user-agent'))
+  try {
+    audit('tariff.sign', 'info', { tariffId: String(tariffId || '').slice(0, 12) + '…', agent: who, ip: req.ip })
+    const data = await signTariffChange(dbo(), { tariffId })
+    invalidateCache()
+    audit('tariff.sign', 'ok', { stage: data.stage })
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[tariff sign]', err.message)
+    audit('tariff.sign', 'error', { reason: err.message })
     res.status(500).json({ success: false, error: err.message })
   }
 })

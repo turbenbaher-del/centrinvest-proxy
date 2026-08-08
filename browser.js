@@ -2231,6 +2231,58 @@ async function getMailCounters(username, password, { orgId } = {}) {
   return { unread, forSign, news: incoming.news ?? 0 }
 }
 
+/**
+ * Полные реквизиты счёта — чтобы отправить контрагенту одним сообщением.
+ *
+ * Сам счёт знает название банка и БИК, но не корсчёт и не ИНН организации.
+ * Корсчёт добираем из справочника банков по БИК, ИНН — из данных организации.
+ * Без них платёжку не заполнить, а именно за этим реквизиты и просят.
+ */
+async function getRequisites(username, password, { account } = {}) {
+  const p = await ensureLoggedIn(username, password)
+  const norm = x => String(x || '').replace(/\D/g, '')
+
+  const r = await bankApi(p, 'GET', '/api/v1/client/accounts/list?_limit=50', null)
+  const list = r.json?.list || r.json?.data?.list || []
+  const acc = account
+    ? list.find(a => norm(a.number) === norm(account))
+    : list[0]
+  if (!acc) throw new Error('счёт не найден')
+
+  const bic = String(acc.bankRequisites?.bankBic || '')
+
+  // Корсчёт лежит в справочнике банков
+  let corrAccount = ''
+  try {
+    const b = await bankApi(p, 'POST', '/api/v1/client/bics/list/search', {
+      filter: { or: [{ op: 'like', column: 'bic', value: `%${bic}%` }] },
+      simpleFilters: null, limit: 5,
+    })
+    const bank = (b.json?.list || []).find(x => String(x.bic) === bic)
+    corrAccount = String(bank?.corrAccount || bank?.account || '')
+  } catch (e) {
+    console.warn('[requisites] корсчёт не получен:', e.message)
+  }
+
+  // ИНН организации
+  let inn = ''
+  try {
+    const o = await bankApi(p, 'GET', '/api/v1/sbp/getOrgInfo', null)
+    inn = String(o.json?.orgInn || o.json?.data?.orgInn || '')
+  } catch { /* без ИНН реквизиты всё равно полезны */ }
+
+  return {
+    orgName: String(acc.org?.name || '').trim(),
+    inn,
+    account: String(acc.number || ''),
+    accountName: String(acc.name || '').trim(),
+    currency: acc.currIsoCode || 'RUB',
+    bankName: String(acc.bankRequisites?.bankName || '').trim(),
+    bic,
+    corrAccount,
+  }
+}
+
 /** Справочник контрагентов клиента (client/partners). */
 async function getPartners(username, password, { search, limit = 50 } = {}) {
   const p = await ensureLoggedIn(username, password)
@@ -3722,4 +3774,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
