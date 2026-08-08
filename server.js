@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, callBankApi } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, getPartners, getBics, callBankApi } = require('./browser')
 const { audit, auditTail, maskAccount } = require('./audit')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
@@ -714,6 +714,50 @@ app.get('/api/operations', async (req, res) => {
     res.json({ success: true, data })
   } catch (err) {
     console.error('[operations]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Платёж контрагенту. Всегда сохраняется ЧЕРНОВИКОМ: деньги двигает только
+// подпись, которую делает владелец своими средствами.
+app.post('/api/pay-contragent', async (req, res) => {
+  const b = req.body || {}
+  try {
+    audit('pay.contragent', 'info', {
+      fromAccount: b.fromAccount, receiverAccount: b.receiverAccount,
+      amount: b.amount, receiverName: b.receiverName,
+    })
+    const data = await payContragent(dbo().login, dbo().password, b)
+    invalidateCache()
+    audit('pay.contragent', data.ok ? 'ok' : 'error',
+      { amount: b.amount, docId: data.id, error: data.error })
+    res.json({ success: !!data.ok, error: data.error || undefined, data })
+  } catch (err) {
+    console.error('[pay-contragent]', err.message)
+    audit('pay.contragent', 'error', { amount: b.amount, error: err.message })
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Справочник контрагентов банка — реквизиты подставляются, а не вводятся руками
+app.get('/api/partners', async (req, res) => {
+  try {
+    const data = await cached(`partners:${req.query.search || ''}`, CACHE_TTL_MS, () =>
+      getPartners(dbo().login, dbo().password, { search: req.query.search }))
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[partners]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Поиск банка по БИК или названию
+app.get('/api/bics', async (req, res) => {
+  try {
+    const data = await getBics(dbo().login, dbo().password, { query: req.query.q })
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[bics]', err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })

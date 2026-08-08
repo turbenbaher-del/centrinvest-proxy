@@ -2114,6 +2114,42 @@ async function getMailCounters(username, password, { orgId } = {}) {
   return { unread, forSign, news: incoming.news ?? 0 }
 }
 
+/** Справочник контрагентов клиента (client/partners). */
+async function getPartners(username, password, { search, limit = 50 } = {}) {
+  const p = await ensureLoggedIn(username, password)
+  const filters = search ? { filterPartners: search } : {}
+  const { list } = await docSearch(p, 'client/partners', { filters, limit, sort: ['name+'] })
+  return list.map(x => ({
+    id: x.id,
+    name: String(x.name ?? '').trim(),
+    account: String(x.account ?? '').trim(),
+    bic: String(x.bic ?? '').trim(),
+    bank: String(x.bankName ?? '').trim(),
+    inn: String(x.inn ?? '').trim(),
+  }))
+}
+
+/**
+ * Поиск банка по БИК или названию (client/bics).
+ * Банк ищет через фильтр с оператором like сразу по двум колонкам — так же,
+ * как это делает подсказка в его собственной форме платежа.
+ */
+async function getBics(username, password, { query, limit = 10 } = {}) {
+  if (!query || String(query).length < 3) return []
+  const p = await ensureLoggedIn(username, password)
+  const like = `%${query}%`
+  const r = await bankApi(p, 'POST', '/api/v1/client/bics/list/search', {
+    filter: { or: [
+      { op: 'like', column: 'bic', value: like },
+      { op: 'like', column: 'name', value: like },
+    ] },
+    simpleFilters: null,
+    limit,
+  })
+  const list = r.json?.list || r.json?.data?.list || []
+  return list.map(x => ({ id: x.id, bic: String(x.bic ?? ''), name: String(x.name ?? '') }))
+}
+
 /** Список документов любого типа. */
 async function docList(p, module, { offset = 0, limit = 300, params = {} } = {}) {
   const qs = new URLSearchParams({ _offset: String(offset), _limit: String(limit), ...params })
@@ -2627,6 +2663,130 @@ function fieldVal(f) {
  * sign=false → черновик (_save, денег не двигает); sign=true → подпись+отправка
  * (_saveAndSign, дальше банк запросит ключ токена и PayControl).
  */
+/**
+ * ПЛАТЁЖ КОНТРАГЕНТУ.
+ *
+ * В реальном ДБО это НЕ REST-документ: разведка исходников банка показала, что
+ * POST doc/rur/payorders там не вызывается вовсе. Форма живёт на серверном UI
+ * (`ui/rur/payment/r030contragent`) и работает так же, как перевод между
+ * своими счетами: значения полей уходят отдельными stateUpdate, действие —
+ * doAction. Поэтому механика здесь та же, что в transferOwnStructured.
+ *
+ * Поля получателя ПЛОСКИЕ (receiverName, receiverINN, ...), а не вложенный
+ * объект — это отличается от того, как документ выглядит при чтении.
+ *
+ * Важная особенность: банк сам дозаполняет форму. По БИК он подставляет
+ * наименование банка и корсчёт, по ИНН — наименование и КПП получателя.
+ * Поэтому эти поля отправляются первыми, отдельными stateUpdate, и только
+ * потом сохраняется документ.
+ *
+ * Всегда сохраняем черновиком (_save). Подпись — отдельным шагом, где человек
+ * вводит ключ с токена и подтверждает в PayControl.
+ */
+async function payContragent(username, password, {
+  fromAccount, amount, purpose = '',
+  receiverName, receiverInn, receiverKpp = '', receiverAccount, receiverBic,
+  vatRule,
+}) {
+  const p = await ensureLoggedIn(username, password)
+  if (!await waitForAppReady(p, 45000)) throw new Error('Интерфейс ДБО не загрузился')
+
+  const norm = x => String(x || '').replace(/\D/g, '')
+  const missing = []
+  if (!fromAccount) missing.push('счёт списания')
+  if (!receiverName) missing.push('наименование получателя')
+  if (!receiverAccount) missing.push('счёт получателя')
+  if (!receiverBic) missing.push('БИК банка получателя')
+  if (!purpose) missing.push('назначение платежа')
+  if (!(Number(amount) > 0)) missing.push('сумма')
+  if (missing.length) return { ok: false, error: 'Не заполнено: ' + missing.join(', ') }
+
+  // Сбрасываем возможную открытую форму от прошлой попытки
+  try {
+    await p.goto('https://dbo.centrinvest.ru/api-ui/', { waitUntil: 'commit', timeout: 30000 })
+    await waitForAppReady(p, 30000)
+  } catch {}
+
+  const r = await bankApi(p, 'POST', '/api/v1/menu/click',
+    { menuItem: 'corporate-api-menu-small-r030contragent' })
+  const form = (r.json?.commands || []).find(c => /r030contragent/.test(c.instanceName || ''))
+  if (!form?.instanceToken) throw new Error('форма платежа контрагенту не открылась')
+
+  const token = form.instanceToken
+  const FORM_PATH = '/api/v1/ui/rur/payment/r030contragent'
+
+  // Счёт списания выбирается по идентификатору из списка формы
+  const payerItems = form.fields?.payerAccountId?.items || []
+  const payer = payerItems.find(i => norm(i.accountNumber || i.account) === norm(fromAccount))
+  if (!payer) {
+    return { ok: false, error: 'счёт списания не найден среди ваших счетов' }
+  }
+
+  /** Отправить значение поля и дать банку дозаполнить связанные. */
+  const setField = async (name, value) => {
+    const resp = await bankApi(p, 'PUT', `${FORM_PATH}/stateUpdate`, {
+      instanceToken: token,
+      rowId: null,
+      submitField: name,
+      fields: { [name]: { value: String(value) } },
+    })
+    return resp.json?.commands || []
+  }
+
+  await setField('payerAccountId', payer.id)
+  // Сначала БИК: по нему банк подставит наименование банка и корсчёт
+  await setField('receiverBankBic', norm(receiverBic))
+  if (receiverInn) await setField('receiverINN', norm(receiverInn))
+  await setField('receiverAccount', norm(receiverAccount))
+  await setField('receiverName', receiverName)
+  if (receiverKpp) await setField('receiverKPP', norm(receiverKpp))
+
+  const fields = {
+    documentSum: { value: Number(amount).toFixed(2) },
+    paymentPurpose: { value: purpose },
+  }
+  if (vatRule) fields.vatCalculationRule = { value: vatRule }
+
+  let resp = await bankApi(p, 'PUT', `${FORM_PATH}/doAction`, {
+    actionId: '_save', fields, instanceToken: token,
+  })
+  console.log('[contragent] после _save →',
+    (resp.json?.commands || []).map(c => c.instanceName).join(', '))
+
+  // Разбор ответа — тот же, что у перевода между своими счетами
+  let lastComplaint = ''
+  for (let step = 0; step < 8; step++) {
+    const cmds = resp.json?.commands || []
+
+    const hard = cmds.flatMap(c => Object.entries(c.fields || {}))
+      .flatMap(([id, f]) => (f.errors || []).map(e => id + ': ' + (e.message || e)))
+    if (hard.length) return { ok: false, error: hard.join('; ') }
+
+    const es = cmds.find(c => /errorsSave/.test(c.instanceName || ''))
+    if (es?.instanceToken) {
+      const said = collectMessages(es)
+      if (said) { lastComplaint = said; console.log('[contragent] банк предупреждает:', said.slice(0, 200)) }
+      resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
+        { actionId: '_save', fields: {}, instanceToken: es.instanceToken })
+      continue
+    }
+
+    const ok = cmds.find(c => /confirmDialog/.test(c.instanceName || ''))
+    const closed = cmds.some(c => c.command === 'formClose' && /r030contragent/.test(c.instanceName || ''))
+    if (ok || closed) {
+      return { ok: true, saved: true, id: await findCreatedDoc(p, { amount, purpose }) }
+    }
+    break
+  }
+
+  const said = lastComplaint
+    || (resp.json?.commands || []).map(collectMessages).filter(Boolean).join('; ')
+  return {
+    ok: false,
+    error: said || 'Банк не подтвердил сохранение платежа. Проверьте реквизиты получателя и назначение',
+  }
+}
+
 async function transferOwnStructured(username, password, { fromAccount, toAccount, amount, purpose = '', sign = false }) {
   const p = await ensureLoggedIn(username, password)
   const ready = await waitForAppReady(p, 45000)
@@ -3323,4 +3483,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
