@@ -1712,7 +1712,14 @@ async function downloadStatement(username, password, { account = '', dateFrom, d
   if (err) throw new Error(msgOf(err) || 'банк не построил выписку')
 
   const file = cmds.find(c => c.command === 'fileDownload' && c.fileId)
-  if (!file) throw new Error('банк не вернул файл выписки')
+  if (!file) {
+    // Банк объясняет отказ информационным окном (например, «выписок за часть
+    // периода не найдено, запросите выписки и повторите печать»). Показываем
+    // его текст: он говорит человеку, что делать, а «файла нет» — не говорит.
+    const inform = cmds.find(c => /informDialog/.test(c.instanceName || ''))
+    if (inform && msgOf(inform)) throw new Error(msgOf(inform))
+    throw new Error('банк не вернул файл выписки')
+  }
 
   // 6. Забираем файл
   const got = await bankFile(p, file.fileId)
