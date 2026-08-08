@@ -754,6 +754,22 @@ app.get('/api/operations', async (req, res) => {
   const from = req.query.from || null
   const to = req.query.to || null
   try {
+    // Сначала просим банк отсортировать и отдать свежие. Так не приходится
+    // угадывать смещение в истории на тысячи записей: при большом объёме
+    // окно попадало в середину, и в приложении висел прошлогодний период.
+    try {
+      const fresh = await getOperations(dbo().login, dbo().password, {
+        dateFrom: from, dateTo: to, limit,
+        accounts: account ? [account] : undefined,
+      })
+      if (fresh.length) {
+        console.log('[operations] сортировка банка:', fresh.length, '| свежая:', fresh[0]?.date)
+        return res.json({ success: true, total: fresh.length, data: fresh })
+      }
+    } catch (e) {
+      console.warn('[operations] поиск с сортировкой не удался, беру страницами:', e.message)
+    }
+
     let ops = await loadAllOperations()
     if (account) {
       ops = ops.filter(o => {

@@ -1972,8 +1972,8 @@ async function getSectionData(username, password, key) {
  * Банк отдаёт на одну запись больше запрошенного — так фронт понимает, что
  * есть следующая страница. Лишнюю отрезаем.
  */
-async function docSearch(p, module, { filters = {}, limit = 50, offset = 0, sort = [] } = {}) {
-  const r = await bankApi(p, 'POST', `/api/v1/${module}/list/search`, {
+async function docSearch(p, module, { filters = {}, limit = 50, offset = 0, sort = [], postfix = '/list' } = {}) {
+  const r = await bankApi(p, 'POST', `/api/v1/${module}${postfix}/search`, {
     simpleFilters: filters,
     limit: limit === -1 ? -1 : limit + 1,
     offset,
@@ -1999,8 +1999,13 @@ async function getOperations(username, password, { dateFrom, dateTo, accounts, o
   if (orgId) filters.orgId = orgId
   if (accounts && accounts.length) filters.accounts = accounts   // не задан — значит все счета
 
+  // Сортировку делает БАНК: минус в конце имени поля — по убыванию, свежие
+  // первыми. Это снимает всю возню с угадыванием смещения: раньше операции
+  // тянулись страницами с конца, и при большом объёме окно попадало в
+  // середину истории — в приложении висел прошлогодний период.
+  // Поиск операций выписки лежит прямо по {module}/search, без /list.
   const { list } = await docSearch(p, 'statements/operations', {
-    filters, limit,
+    filters, limit, postfix: '',
     sort: ['operationDate-', 'documentNumber-', 'id-'],
   })
   console.log('[operations] получено операций:', list.length)
