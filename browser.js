@@ -1964,6 +1964,50 @@ async function getSectionData(username, password, key) {
  */
 
 /**
+ * Печатная форма документа с отметкой банка.
+ *
+ * GET {module}/{id}/print?disposition=&format= — банк отдаёт готовый файл.
+ * Именно такую платёжку просят контрагенты и налоговая, и сделать её самим
+ * нельзя: отметку об исполнении ставит банк.
+ *
+ * Файл двоичный, а обычный bankApi разбирает ответ как JSON. Поэтому читаем
+ * содержимое внутри страницы и переносим наружу строкой base64 — иначе байты
+ * портятся при переходе из браузера в Node.
+ */
+async function getDocumentPrint(username, password, { id, module = SIGN_MODULE, format = 'PDF' }) {
+  if (!id) throw new Error('не передан id документа')
+  const p = await ensureLoggedIn(username, password)
+  if (!sessionAuthToken) throw new Error('токен сессии банка не пойман')
+
+  const path = `/api/v1/${module}/${encodeURIComponent(id)}/print`
+    + `?disposition=download&format=${encodeURIComponent(format)}`
+
+  const res = await p.evaluate(async ([u, t]) => {
+    const r = await fetch('https://dbo.centrinvest.ru' + u, {
+      method: 'GET',
+      headers: { authToken: t, 'Cache-Control': 'private, max-age=0' },
+      credentials: 'include',
+    })
+    if (!r.ok) return { ok: false, status: r.status }
+    const buf = new Uint8Array(await r.arrayBuffer())
+    // Побайтно в строку и base64: так двоичные данные переживут переход
+    let bin = ''
+    for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i])
+    return {
+      ok: true,
+      status: r.status,
+      type: r.headers.get('content-type') || 'application/pdf',
+      disposition: r.headers.get('content-disposition') || '',
+      base64: btoa(bin),
+    }
+  }, [path, sessionAuthToken])
+
+  if (!res.ok) throw new Error(`банк не отдал печатную форму (код ${res.status})`)
+  console.log('[print] документ', String(id).slice(0, 12) + '…', '|', res.type)
+  return res
+}
+
+/**
  * Поиск по списку: POST {module}/list/search.
  * Правильнее простого GET list — банк сам фильтрует и сортирует, а не мы
  * перебираем сотни записей у себя. Сортировка задаётся строками вида
@@ -2804,6 +2848,128 @@ async function payContragent(username, password, {
   }
 }
 
+/**
+ * ПЛАТЁЖ В БЮДЖЕТ — налоги, взносы, пошлины.
+ *
+ * Отдельная форма банка (`ui/rur/payment/r030budget`) с налоговыми полями.
+ * Имена у них неочевидные, взяты из исходников банка, а не придуманы:
+ *   drawerStatus — статус плательщика (поле 101)
+ *   cbc          — КБК (104)
+ *   ocato        — ОКТМО (105), именно ocato, не oktmo
+ *   payReason    — основание платежа (106)
+ *   taxDocNumber — номер документа-основания (108)
+ *   uip          — УИН (22)
+ * Ошибиться в них легко, а банк вернёт отказ уже после отправки.
+ *
+ * Правила обязательности полей задаёт банк: он проверяет их на сервере и
+ * отвечает текстом, который мы показываем как есть.
+ */
+async function payBudget(username, password, {
+  fromAccount, amount, purpose = '',
+  receiverName, receiverInn, receiverKpp = '', receiverAccount, receiverBic,
+  drawerStatus, cbc, oktmo, payReason, taxPeriod, taxDocNumber, uin,
+}) {
+  const p = await ensureLoggedIn(username, password)
+  if (!await waitForAppReady(p, 45000)) throw new Error('Интерфейс ДБО не загрузился')
+
+  const norm = x => String(x || '').replace(/\D/g, '')
+  const missing = []
+  if (!fromAccount) missing.push('счёт списания')
+  if (!receiverName) missing.push('получатель')
+  if (!receiverAccount) missing.push('счёт получателя')
+  if (!receiverBic) missing.push('БИК')
+  if (!purpose) missing.push('назначение платежа')
+  if (!(Number(amount) > 0)) missing.push('сумма')
+  if (!cbc) missing.push('КБК')
+  if (missing.length) return { ok: false, error: 'Не заполнено: ' + missing.join(', ') }
+
+  try {
+    await p.goto('https://dbo.centrinvest.ru/api-ui/', { waitUntil: 'commit', timeout: 30000 })
+    await waitForAppReady(p, 30000)
+  } catch {}
+
+  const r = await bankApi(p, 'POST', '/api/v1/menu/click',
+    { menuItem: 'corporate-api-menu-small-r030budget' })
+  const form = (r.json?.commands || []).find(c => /r030budget/.test(c.instanceName || ''))
+  if (!form?.instanceToken) throw new Error('форма платежа в бюджет не открылась')
+
+  const token = form.instanceToken
+  const FORM_PATH = '/api/v1/ui/rur/payment/r030budget'
+
+  const payerItems = form.fields?.payerAccountId?.items || []
+  const payer = payerItems.find(i => norm(i.accountNumber || i.account) === norm(fromAccount))
+  if (!payer) return { ok: false, error: 'счёт списания не найден среди ваших счетов' }
+
+  const setField = async (name, value) => {
+    if (value === undefined || value === null || value === '') return
+    await bankApi(p, 'PUT', `${FORM_PATH}/stateUpdate`, {
+      instanceToken: token,
+      rowId: null,
+      submitField: name,
+      fields: { [name]: { value: String(value) } },
+    })
+  }
+
+  await setField('payerAccountId', payer.id)
+  await setField('receiverBankBic', norm(receiverBic))
+  await setField('receiverINN', norm(receiverInn))
+  await setField('receiverAccount', norm(receiverAccount))
+  await setField('receiverName', receiverName)
+  if (receiverKpp) await setField('receiverKPP', norm(receiverKpp))
+
+  // Налоговые реквизиты
+  await setField('drawerStatus', drawerStatus)
+  await setField('cbc', cbc)
+  await setField('ocato', oktmo)
+  await setField('payReason', payReason)
+  await setField('taxDocNumber', taxDocNumber)
+  await setField('uip', uin)
+
+  const fields = {
+    documentSum: { value: Number(amount).toFixed(2) },
+    paymentPurpose: { value: purpose },
+  }
+  if (taxPeriod) fields.taxPeriodDate = { value: taxPeriod }
+
+  let resp = await bankApi(p, 'PUT', `${FORM_PATH}/doAction`, {
+    actionId: '_save', fields, instanceToken: token,
+  })
+  console.log('[budget] после _save →',
+    (resp.json?.commands || []).map(c => c.instanceName).join(', '))
+
+  let lastComplaint = ''
+  for (let step = 0; step < 8; step++) {
+    const cmds = resp.json?.commands || []
+
+    const hard = cmds.flatMap(c => Object.entries(c.fields || {}))
+      .flatMap(([id, f]) => (f.errors || []).map(e => id + ': ' + (e.message || e)))
+    if (hard.length) return { ok: false, error: hard.join('; ') }
+
+    const es = cmds.find(c => /errorsSave/.test(c.instanceName || ''))
+    if (es?.instanceToken) {
+      const said = collectMessages(es)
+      if (said) { lastComplaint = said; console.log('[budget] банк предупреждает:', said.slice(0, 200)) }
+      resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
+        { actionId: '_save', fields: {}, instanceToken: es.instanceToken })
+      continue
+    }
+
+    const ok = cmds.find(c => /confirmDialog/.test(c.instanceName || ''))
+    const closed = cmds.some(c => c.command === 'formClose' && /r030budget/.test(c.instanceName || ''))
+    if (ok || closed) {
+      return { ok: true, saved: true, id: await findCreatedDoc(p, { amount, purpose }) }
+    }
+    break
+  }
+
+  const said = lastComplaint
+    || (resp.json?.commands || []).map(collectMessages).filter(Boolean).join('; ')
+  return {
+    ok: false,
+    error: said || 'Банк не подтвердил сохранение. Проверьте КБК, ОКТМО и статус плательщика',
+  }
+}
+
 async function transferOwnStructured(username, password, { fromAccount, toAccount, amount, purpose = '', sign = false }) {
   const p = await ensureLoggedIn(username, password)
   const ready = await waitForAppReady(p, 45000)
@@ -3500,4 +3666,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }

@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, getPartners, getBics, callBankApi } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getPartners, getBics, callBankApi } = require('./browser')
 const { audit, auditTail, maskAccount } = require('./audit')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
@@ -831,6 +831,41 @@ app.post('/api/pay-contragent', async (req, res) => {
   } catch (err) {
     console.error('[pay-contragent]', err.message)
     audit('pay.contragent', 'error', { amount: b.amount, error: err.message })
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Платёж в бюджет: налоги, взносы, пошлины. Тоже черновиком — подпись отдельно.
+app.post('/api/pay-budget', async (req, res) => {
+  const b = req.body || {}
+  try {
+    audit('pay.budget', 'info', { fromAccount: b.fromAccount, amount: b.amount, cbc: b.cbc })
+    const data = await payBudget(dbo().login, dbo().password, b)
+    invalidateCache()
+    audit('pay.budget', data.ok ? 'ok' : 'error', { amount: b.amount, docId: data.id, error: data.error })
+    res.json({ success: !!data.ok, error: data.error || undefined, data })
+  } catch (err) {
+    console.error('[pay-budget]', err.message)
+    audit('pay.budget', 'error', { amount: b.amount, error: err.message })
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Печатная форма документа с отметкой банка — её просят контрагенты и налоговая
+app.get('/api/documents/:id/print', async (req, res) => {
+  try {
+    const r = await getDocumentPrint(dbo().login, dbo().password, {
+      id: req.params.id,
+      format: String(req.query.format || 'PDF').toUpperCase(),
+    })
+    const buf = Buffer.from(r.base64, 'base64')
+    res.setHeader('Content-Type', r.type)
+    res.setHeader('Content-Disposition', r.disposition || 'attachment; filename="document.pdf"')
+    audit('doc.print', 'ok', { docId: req.params.id })
+    res.send(buf)
+  } catch (err) {
+    console.error('[print]', err.message)
+    audit('doc.print', 'error', { docId: req.params.id, error: err.message })
     res.status(500).json({ success: false, error: err.message })
   }
 })
