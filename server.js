@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, callBankApi } = require('./browser')
 const { audit, auditTail, maskAccount } = require('./audit')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
@@ -696,6 +696,76 @@ app.get('/api/operations', async (req, res) => {
     res.json({ success: true, total: ops.length, data: ops.slice(0, limit) })
   } catch (err) {
     console.error('[statement]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Операции по ВСЕМ счетам за период. Выписка через doc/statements/byPeriod
+// отдаёт только обороты по счёту, поэтому история приходила лишь по одному
+// счёту — здесь настоящие операции по всем.
+app.get('/api/operations', async (req, res) => {
+  const { dateFrom, dateTo, limit } = req.query
+  try {
+    const key = `operations:${dateFrom || ''}:${dateTo || ''}:${limit || ''}`
+    const data = await cached(key, CACHE_TTL_MS, () =>
+      getOperations(dbo().login, dbo().password, {
+        dateFrom, dateTo, limit: Math.min(Number(limit) || 200, 500),
+      }))
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[operations]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// ─── Письма в банк ──────────────────────────────────────────────────────────
+app.get('/api/mail', async (req, res) => {
+  const box = req.query.box === 'out' ? 'out' : 'in'
+  try {
+    const data = await cached(`mail:${box}`, CACHE_TTL_MS, () =>
+      getMail(dbo().login, dbo().password, { box, limit: Math.min(Number(req.query.limit) || 50, 200) }))
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[mail]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+app.get('/api/mail/counters', async (_, res) => {
+  try {
+    const data = await cached('mail:counters', CACHE_TTL_MS, () =>
+      getMailCounters(dbo().login, dbo().password, {}))
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[mail counters]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+app.get('/api/mail/:id', async (req, res) => {
+  const box = req.query.box === 'out' ? 'out' : 'in'
+  try {
+    const data = await getMailItem(dbo().login, dbo().password, { box, id: req.params.id })
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[mail item]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Отметка о прочтении: письмо открыли — банк должен об этом знать,
+// иначе счётчик непрочитанных не сойдётся с тем, что видно в ДБО.
+app.post('/api/mail/:id/read', async (req, res) => {
+  const box = req.query.box === 'out' ? 'out' : 'in'
+  try {
+    const data = await markMailRead(dbo().login, dbo().password, {
+      box, id: req.params.id, read: req.body?.read !== false,
+    })
+    invalidateCache()
+    audit('mail.read', 'ok', { mailId: req.params.id })
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[mail read]', err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })

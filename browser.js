@@ -1963,6 +1963,157 @@ async function getSectionData(username, password, key) {
  * Дальше остаётся только знать МОДЕЛЬ каждого документа — набор полей.
  */
 
+/**
+ * Поиск по списку: POST {module}/list/search.
+ * Правильнее простого GET list — банк сам фильтрует и сортирует, а не мы
+ * перебираем сотни записей у себя. Сортировка задаётся строками вида
+ * 'docDate-' (минус в конце = по убыванию).
+ *
+ * Банк отдаёт на одну запись больше запрошенного — так фронт понимает, что
+ * есть следующая страница. Лишнюю отрезаем.
+ */
+async function docSearch(p, module, { filters = {}, limit = 50, offset = 0, sort = [] } = {}) {
+  const r = await bankApi(p, 'POST', `/api/v1/${module}/list/search`, {
+    simpleFilters: filters,
+    limit: limit === -1 ? -1 : limit + 1,
+    offset,
+    sort,
+    scrollToId: null,
+  })
+  const list = r.json?.list || r.json?.data?.list || []
+  const hasMore = limit !== -1 && list.length > limit
+  return { list: hasMore ? list.slice(0, limit) : list, hasMore }
+}
+
+/**
+ * Операции по выписке ПО ВСЕМ СЧЕТАМ за период.
+ * Отдельный модуль statements/operations — не тот, что doc/statements/byPeriod:
+ * последний отдаёт только обороты по счёту (дебет/кредит), без самих операций.
+ * Именно поэтому история раньше приходила лишь по одному счёту.
+ */
+async function getOperations(username, password, { dateFrom, dateTo, accounts, orgId, limit = 200 } = {}) {
+  const p = await ensureLoggedIn(username, password)
+  const filters = { showActual: true }
+  if (dateFrom) filters.dateFrom = dateFrom
+  if (dateTo) filters.dateTo = dateTo
+  if (orgId) filters.orgId = orgId
+  if (accounts && accounts.length) filters.accounts = accounts   // не задан — значит все счета
+
+  const { list } = await docSearch(p, 'statements/operations', {
+    filters, limit,
+    sort: ['operationDate-', 'documentNumber-', 'id-'],
+  })
+  console.log('[operations] получено операций:', list.length)
+
+  // Дебет или кредит определяется наличием суммы — так же считает фронт банка
+  return list.map(o => {
+    const debit = !!o.debet && Number(o.debet) !== 0
+    const party = debit ? o.receiver : o.payer
+    return {
+      id: o.id,
+      date: String(o.operationDate || '').slice(0, 10),
+      number: String(o.documentNumber ?? '').trim(),
+      account: String(o.accountName ?? '').trim(),
+      purpose: String(o.paymentPurpose ?? '').trim(),
+      amount: debit ? -Math.abs(Number(o.debet) || 0) : Math.abs(Number(o.credit) || 0),
+      direction: debit ? 'out' : 'in',
+      currency: o.payerCurrIsoCode || o.receiverCurrIsoCode || 'RUR',
+      counterparty: {
+        name: String(party?.name ?? '').trim(),
+        inn: party?.inn || '',
+        account: party?.account || '',
+        bank: party?.bankName || '',
+        bic: party?.bankBic || '',
+      },
+      status: 'Исполнен',
+    }
+  })
+}
+
+// ─── ПИСЬМА В БАНК ──────────────────────────────────────────────────────────
+// У банка асимметрия в путях, и её легко перепутать: множественное
+// `messages/*` — для списков и массовых действий, `doc/messages/*` — для
+// операций над одним письмом.
+const MAIL_LIST = { in: 'messages/incoming', out: 'messages/outgoing' }
+const MAIL_DOC  = { in: 'doc/messages/incoming', out: 'doc/messages/outgoing' }
+
+/** Список писем. box: 'in' — входящие, 'out' — исходящие. */
+async function getMail(username, password, { box = 'in', limit = 50, offset = 0, search } = {}) {
+  const p = await ensureLoggedIn(username, password)
+  const filters = {}
+  if (search) filters.textToSearch = search
+  if (box === 'out') filters.showOutgoing = true
+
+  const { list, hasMore } = await docSearch(p, MAIL_LIST[box], {
+    filters, limit, offset,
+    sort: ['docDate-', 'lastChangeStateDate-'],
+  })
+  console.log(`[mail] ${box === 'in' ? 'входящих' : 'исходящих'} писем:`, list.length)
+
+  return {
+    hasMore,
+    items: list.map(m => ({
+      id: m.id,
+      date: String(m.docDate || '').slice(0, 10),
+      subject: String(m.title ?? '').trim() || 'Без темы',
+      preview: String(m.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      read: !!m.read,
+      hasAttaches: !!m.hasAttaches,
+      from: String(m.from ?? m.branchName ?? '').trim(),
+      status: String(m.clientState ?? '').trim(),
+      type: m.type,
+    })),
+  }
+}
+
+/** Одно письмо целиком, вместе с вложениями. */
+async function getMailItem(username, password, { box = 'in', id }) {
+  const p = await ensureLoggedIn(username, password)
+  const m = await docGet(p, MAIL_DOC[box], id)
+  return {
+    id: m?.id,
+    date: String(m?.docDate || '').slice(0, 10),
+    subject: String(m?.title ?? '').trim() || 'Без темы',
+    text: String(m?.text ?? ''),
+    from: String(m?.from ?? m?.branchName ?? '').trim(),
+    read: !!m?.read,
+    status: String(m?.clientState ?? '').trim(),
+    attaches: (m?.attaches || []).map(a => ({ id: a.id, name: a.name, size: a.size })),
+    bankInfo: m?.bankInfo || undefined,
+  }
+}
+
+/** Отметить письмо прочитанным (или снять отметку). */
+async function markMailRead(username, password, { box = 'in', id, read = true }) {
+  const p = await ensureLoggedIn(username, password)
+  await bankApi(p, 'PUT', `/api/v1/${MAIL_DOC[box]}/${encodeURIComponent(id)}/toggleRead`, { read })
+  return { ok: true, read }
+}
+
+/** Счётчики: непрочитанные входящие и исходящие, ожидающие подписи. */
+async function getMailCounters(username, password, { orgId } = {}) {
+  const p = await ensureLoggedIn(username, password)
+  // Банк отдаёт массив пар «имя счётчика — значение»; сворачиваем в объект
+  const toCount = (json) => {
+    const raw = json?.data ?? json
+    if (Array.isArray(raw)) {
+      return raw.reduce((acc, x) => ({ ...acc, [x.name]: Number(x.value) || 0 }), {})
+    }
+    return raw && typeof raw === 'object' ? raw : {}
+  }
+  const qs = orgId ? `?orgId=${encodeURIComponent(orgId)}&currControlMessages=false` : '?currControlMessages=false'
+  const [inc, out] = await Promise.all([
+    bankApi(p, 'GET', `/api/v1/doc/messages/incoming/unreadCount${qs}`, null).catch(() => ({})),
+    bankApi(p, 'GET', `/api/v1/doc/messages/outgoing/unreadSignCount${orgId ? `?orgId=${encodeURIComponent(orgId)}` : ''}`, null).catch(() => ({})),
+  ])
+  const incoming = toCount(inc.json)
+  const outgoing = toCount(out.json)
+  const unread = incoming.income ?? Object.values(incoming)[0] ?? 0
+  const forSign = Object.values(outgoing)[0] ?? 0
+  console.log('[mail] непрочитанных:', unread, '| на подпись:', forSign)
+  return { unread, forSign, news: incoming.news ?? 0 }
+}
+
 /** Список документов любого типа. */
 async function docList(p, module, { offset = 0, limit = 300, params = {} } = {}) {
   const qs = new URLSearchParams({ _offset: String(offset), _limit: String(limit), ...params })
@@ -3172,4 +3323,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, ensureLoggedIn, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
