@@ -948,6 +948,22 @@ app.post('/api/mail/:id/read', async (req, res) => {
   }
 })
 
+// Разведка API банка: посмотреть ответ произвольного адреса, не гадая.
+// ТОЛЬКО ЧТЕНИЕ: методы, меняющие данные, здесь запрещены — разведочный
+// маршрут не должен уметь двигать деньги.
+app.get('/api/recon/call', async (req, res) => {
+  const path = String(req.query.path || '')
+  if (!path.startsWith('/api/v1/')) {
+    return res.status(400).json({ success: false, error: 'путь должен начинаться с /api/v1/' })
+  }
+  try {
+    const r = await callBankApi(dbo().login, dbo().password, { method: 'GET', path })
+    res.json({ success: true, status: r.status, data: r.json })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
 // Журнал действий: что происходило, когда и чем закончилось.
 // Секретов не содержит, номера счетов маскированы.
 app.get('/api/audit', (req, res) => {
