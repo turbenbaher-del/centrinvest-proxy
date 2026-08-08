@@ -18,6 +18,7 @@ const express = require('express')
 const cors = require('cors')
 const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getPartners, getBics, callBankApi } = require('./browser')
 const { audit, auditTail, maskAccount } = require('./audit')
+const { getAcquiring } = require('./acquiring')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
 const app = express()
@@ -660,9 +661,11 @@ app.get('/debug/accounts-dom', async (req, res) => {
 })
 
 app.get('/api/statement', async (req, res) => {
-  const { account = '', dateFrom, dateTo, format = 'pdf' } = req.query
+  // reportForm — форма отчёта банка (1, 1a, 2, 3, 4): от неё зависит содержимое файла
+  // by=account|contractor — выписка по счёту или по контрагенту
+  const { account = '', dateFrom, dateTo, format = 'pdf', reportForm = '1', by = 'account' } = req.query
   try {
-    const { buffer, filename, mimeType } = await downloadStatement(dbo().login, dbo().password, { account, dateFrom, dateTo, format })
+    const { buffer, filename, mimeType } = await downloadStatement(dbo().login, dbo().password, { account, dateFrom, dateTo, format, reportForm, by })
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`)
     res.setHeader('Content-Type', mimeType)
     res.setHeader('Content-Length', buffer.length)
@@ -962,13 +965,62 @@ app.get('/api/audit', (req, res) => {
 // Возвращаем нормализованный вид: {title, grids: {поле: [строки]}, selects: {...}}.
 app.get('/api/form', async (req, res) => {
   const menuItem = String(req.query.menuItem || '').trim()
+  // tab — идентификатор вкладки внутри раздела (form_switcher). Разделы вроде
+  // эквайринга при открытии отдают только каркас: содержимое приходит после
+  // переключения на нужную вкладку, как при клике в интерфейсе.
+  const tab = String(req.query.tab || '').trim()
   if (!menuItem) return res.status(400).json({ success: false, error: 'не указан menuItem' })
   try {
-    const data = await cached('form:' + menuItem, CACHE_TTL_MS, async () => {
+    const data = await cached('form:' + menuItem + ':' + tab, CACHE_TTL_MS, async () => {
       const r = await callBankApi(dbo().login, dbo().password, {
         method: 'POST', path: '/api/v1/menu/click', body: { menuItem },
       })
-      const cmds = r.json?.commands || []
+      let cmds = r.json?.commands || []
+
+      if (tab) {
+        // Вкладки бывают вложенными («Мои ТСП» → «Терминалы»), и содержимое
+        // приходит только после переключения на конечный уровень. Поэтому
+        // принимаем цепочку через запятую и проходим её по шагам, каждый раз
+        // заново отыскивая форму со свитчером — после переключения банк
+        // присылает новую форму с новым токеном.
+        // Самый свежий токен формы: банк выдаёт новый на каждое обновление,
+        // а старый после этого данных уже не отдаёт.
+        const tokenOf = (name) => {
+          let t = null
+          for (const c of cmds) if (c.instanceName === name && c.instanceToken) t = c.instanceToken
+          return t
+        }
+        for (const step of tab.split(',').map(s => s.trim()).filter(Boolean)) {
+          const hosts = cmds.filter(c => c.command === 'formInit'
+            && Object.values(c.fields || {}).some(f => f?.type === 'form_switcher')).reverse()
+          // Берём ту форму, в свитчере которой есть нужная вкладка
+          let host = null, switcherId = null
+          for (const h of hosts) {
+            for (const [id, f] of Object.entries(h.fields || {})) {
+              if (f?.type !== 'form_switcher') continue
+              if ((f.items || []).some(i => i.id === step)) { host = h; switcherId = id; break }
+            }
+            if (host) break
+          }
+          if (!host) { console.log('[form] вкладка не найдена:', step); break }
+
+          // Переключение вкладки — doAction с extActionId, как делает веб-версия.
+          // stateUpdate по полю свитчера банк принимает молча и форму вкладки
+          // не присылает: раздел выглядит пустым, хотя данные есть.
+          const upd = await callBankApi(dbo().login, dbo().password, {
+            method: 'PUT',
+            path: `/api/v1/${host.instanceName}/doAction`,
+            body: {
+              instanceToken: tokenOf(host.instanceName) || host.instanceToken,
+              actionId: `_switchForm_${switcherId}`,
+              extActionId: step,
+            },
+          })
+          const more = upd.json?.commands || []
+          if (more.length) cmds = cmds.concat(more)
+          console.log(`[form] вкладка ${step}: команд ${more.length}`)
+        }
+      }
 
       const err = cmds.find(c => /errorDialog/.test(c.instanceName || ''))
       if (err) {
@@ -988,7 +1040,11 @@ app.get('/api/form', async (req, res) => {
         return out
       }
 
-      const forms = cmds.filter(c => c.command === 'formInit')
+      // Списки банк присылает не только в formInit: терминалы, реестры и другие
+      // «скроллеры» приходят отдельными командами со своими items/columns.
+      // Разбираем всё, где есть содержимое, иначе раздел выглядит пустым.
+      const forms = cmds.filter(c => c.command === 'formInit' || c.command === 'scrollerInit'
+        || c.command === 'getPage' || Array.isArray(c.items))
       const grids = {}
       const selects = {}
       const extras = {}
@@ -996,6 +1052,17 @@ app.get('/api/form', async (req, res) => {
 
       for (const f of forms) {
         if (f.title && !title) title = f.title
+
+        // Скроллер отдаёт строки прямо в items — без обёртки в поля формы
+        if (Array.isArray(f.items) && f.items.length) {
+          const key = f.instanceName ? String(f.instanceName).split('/').pop() : (f.command || 'items')
+          const rows = f.items.map(it => {
+            const base = flat(it)
+            if (it && typeof it === 'object' && it.fields) Object.assign(base, flat(it.fields))
+            return base
+          }).filter(r => Object.keys(r).length)
+          if (rows.length) grids[key] = (grids[key] || []).concat(rows)
+        }
         for (const [id, field] of Object.entries(f.fields || {})) {
           const items = field?.items || (Array.isArray(field?.value) ? field.value : null)
           if (!Array.isArray(items) || items.length === 0) continue
@@ -1019,6 +1086,25 @@ app.get('/api/form', async (req, res) => {
     res.json({ success: true, data })
   } catch (err) {
     console.error('[form]', menuItem, err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// Эквайринг: терминалы, отчёты (платежи, операции, СБП), возвраты, счета и акты.
+//
+// Отдельный маршрут, а не /api/form, потому что раздел требует своей
+// последовательности: переключение вкладки действием и применение периода —
+// иначе банк отдаёт пустые списки за сегодняшний день.
+app.get('/api/acquiring/:key', async (req, res) => {
+  const key = String(req.params.key || '').trim()
+  const { from = '', to = '', search = '', limit = '' } = req.query
+  try {
+    const cacheKey = `acq:${key}:${from}:${to}:${search}:${limit}`
+    const data = await cached(cacheKey, CACHE_TTL_MS, () =>
+      getAcquiring(dbo(), { key, from, to, search, limit }))
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[acquiring]', key, err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })

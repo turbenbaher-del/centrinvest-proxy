@@ -1518,7 +1518,8 @@ async function submitPayment(username, password, paymentData) {
   }
 }
 
-async function downloadStatement(username, password, { account = '', dateFrom, dateTo, format = 'pdf' }) {
+// by: 'account' — выписка по счёту (по умолчанию), 'contractor' — по контрагенту
+async function downloadStatement(username, password, { account = '', dateFrom, dateTo, format = 'pdf', reportForm = '1', by = 'account' }) {
   const fs = require('fs')
   const path = require('path')
   const os = require('os')
@@ -1542,6 +1543,20 @@ async function downloadStatement(username, password, { account = '', dateFrom, d
   }
   try { await p.click('text=Выписка', { timeout: 5000 }); await p.waitForTimeout(2000) } catch (e) {
     console.log('[statement] nav2 fail:', e.message)
+  }
+
+  // Кнопка «Выписка» раскрывает меню: по счёту / по контрагенту / экспорт.
+  // Без явного выбора банк открывает выписку по счёту.
+  if (by === 'contractor') {
+    const picked = await p.evaluate(() => {
+      const els = Array.from(document.querySelectorAll('div,span,li,button,a,[role="menuitem"]'))
+      const el = els.find(e => (e.textContent || '').trim() === 'Выписка по контрагенту')
+      if (!el) return false
+      el.click()
+      return true
+    })
+    console.log('[statement] выписка по контрагенту:', picked ? 'выбрана' : 'пункт не найден')
+    await p.waitForTimeout(1500)
   }
 
   console.log('[statement] URL after nav:', p.url())
@@ -1569,9 +1584,50 @@ async function downloadStatement(username, password, { account = '', dateFrom, d
     await p.waitForTimeout(500)
   }
 
-  // Select format if a selector exists
-  const fmtLabels = { pdf: 'PDF', xlsx: 'Excel', csv: 'CSV', '1c': '1С' }
+  // Форма отчёта. В окне выписки банк предлагает пять вариантов, и от выбора
+  // зависит содержимое файла: обычная выписка, с приложениями, расширенная,
+  // сводная, операции по расчётному счёту. Выбираем до формата: смена формы
+  // перерисовывает окно и сбрасывает ранее выбранный формат.
+  const FORM_LABELS = {
+    '1': 'Форма 1 (Обычная выписка)',
+    '1a': 'Форма 1 (Обычная выписка с приложениями)',
+    '2': 'Форма 2 (Расширенная выписка)',
+    '3': 'Форма 3 (Сводная выписка)',
+    '4': 'Форма 4 (Операции по расчетному счету)',
+  }
+  const pickFromDropdown = async (currentText, wantedText) => {
+    // Сначала раскрываем список: без этого пункты не отрисованы в DOM
+    const opened = await p.evaluate((cur) => {
+      const els = Array.from(document.querySelectorAll('div,span,button,[role="button"],[role="combobox"]'))
+      const el = els.find(e => (e.textContent || '').trim() === cur)
+      if (!el) return false
+      const clickable = el.closest('[role="combobox"],[class*="select"],[class*="Select"]') || el
+      clickable.click()
+      return true
+    }, currentText)
+    if (!opened) return false
+    await p.waitForTimeout(400)
+    return p.evaluate((want) => {
+      const els = Array.from(document.querySelectorAll('div,span,li,button,[role="option"],[role="menuitem"],option'))
+      const el = els.find(e => (e.textContent || '').trim() === want)
+      if (!el) return false
+      el.click()
+      return true
+    }, wantedText)
+  }
+
+  if (reportForm && FORM_LABELS[reportForm] && reportForm !== '1') {
+    const ok = await pickFromDropdown(FORM_LABELS['1'], FORM_LABELS[reportForm])
+    console.log('[statement] форма отчёта', reportForm, ok ? 'выбрана' : 'не выбрана (оставлена Форма 1)')
+    await p.waitForTimeout(500)
+  }
+
+  // Формат файла — тем же способом, через раскрытие списка
+  const fmtLabels = { pdf: 'PDF', xls: 'XLS', xlsx: 'XLS', csv: 'CSV', '1c': '1С' }
   const targetLabel = fmtLabels[format] || 'PDF'
+  if (targetLabel !== 'PDF') {
+    await pickFromDropdown('PDF', targetLabel)
+  }
   await p.evaluate((lbl) => {
     const els = Array.from(document.querySelectorAll('button, [role="option"], [role="menuitem"], option, label, span'))
     for (const el of els) {
