@@ -661,14 +661,33 @@ async function loadAllOperations() {
   if (stmtCache.data && now - stmtCache.at < STMT_TTL) return stmtCache.data
   if (stmtCache.pending) return stmtCache.pending
   stmtCache.pending = (async () => {
-    const r = await callBankApi(dbo().login, dbo().password, {
-      method: 'GET',
-      path: '/api/v1/statements/operations?_offset=0&_limit=20000',
-    })
-    const arr = Array.isArray(r.json) ? r.json : (r.json?.list || r.json?.items || [])
-    stmtCache.at = Date.now(); stmtCache.data = arr; stmtCache.pending = null
-    console.log('[statement] получено операций:', arr.length)
-    return arr
+    // Банк отдаёт операции от старых к новым и не поддерживает сортировку,
+    // поэтому свежие лежат В КОНЦЕ списка. Тянуть всё разом нельзя: у клиента
+    // около 10 000 операций (~7 МБ), и такой ответ внутри страницы роняет
+    // браузер в контейнере — вход в банк после этого падает с ERR_ABORTED.
+    // Поэтому идём с конца страницами: обычно хватает одной-двух.
+    const PAGE = 1500
+    let offset = 8000
+    let tail = []
+    for (let step = 0; step < 6; step++) {
+      const r = await callBankApi(dbo().login, dbo().password, {
+        method: 'GET',
+        path: `/api/v1/statements/operations?_offset=${offset}&_limit=${PAGE}`,
+      })
+      const arr = Array.isArray(r.json) ? r.json : (r.json?.list || r.json?.items || [])
+      if (arr.length === 0) {
+        // Ушли за конец — отступаем назад и пробуем ближе к началу
+        if (offset <= 0) break
+        offset = Math.max(0, offset - PAGE)
+        continue
+      }
+      tail = arr
+      if (arr.length < PAGE) break          // это последняя страница
+      offset += PAGE                        // возможно, есть ещё свежее
+    }
+    stmtCache.at = Date.now(); stmtCache.data = tail; stmtCache.pending = null
+    console.log('[operations] загружено операций (хвост):', tail.length)
+    return tail
   })().catch(e => { stmtCache.pending = null; throw e })
   return stmtCache.pending
 }
@@ -827,6 +846,13 @@ app.post('/api/logout', async (_, res) => {
   liveSession = null
   cachedWhoAmI = null
   invalidateCache()
+  // Браузер не трогаем, пока идёт вход: закрытие на полпути роняло его
+  // ошибкой «browser has been closed» и вход не завершался никогда.
+  if (whoAmIWarming) {
+    console.log('[auth] выход во время входа — браузер оставлен, пароль стёрт')
+    audit('auth.logout', 'ok', { note: 'во время входа' })
+    return res.json({ success: true })
+  }
   await closeBrowser()
   console.log('[auth] выход — пароль стёрт из памяти')
   audit('auth.logout', 'ok', {})
