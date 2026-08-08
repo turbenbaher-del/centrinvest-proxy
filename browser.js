@@ -1938,6 +1938,91 @@ async function getSectionData(username, password, key) {
 }
 
 /** Запрос к API банка из уже открытой сессии — без повторного входа. */
+/**
+ * ─── УНИВЕРСАЛЬНЫЙ СЛОЙ ДОКУМЕНТОВ ─────────────────────────────────────────
+ *
+ * У банка около 30 типов документов (рублёвые платёжки, валютные переводы,
+ * СБП, письма, заявки) и все они живут по ОДНОМУ контракту — так устроен его
+ * собственный фронт: useCreateOrEditDoc, useServerValidate, useSignWithConfirmation,
+ * useSendWithConfirmation работают с любым модулем через параметр `module`.
+ *
+ * Значит и нам не нужно писать реализацию под каждый тип. Один набор функций
+ * с параметром модуля закрывает их все:
+ *
+ *   GET  {module}/list?_offset=&_limit=   — список документов
+ *   GET  {module}/{id}                    — один документ
+ *   POST {module}                         — создать (вернёт id)
+ *   PUT  {module}/{id}                    — изменить
+ *   POST {module}/validate/tree           — серверные контроли
+ *   POST {module}/getUserCryptoProfiles   — средства подписи
+ *   POST {module}/prepareSign             — начать подпись
+ *   POST {module}/continueSign            — завершить подпись
+ *   POST {module}/send                    — отправить в банк
+ *   GET  {module}/canDoAction/{id}?...    — доступно ли действие
+ *
+ * Дальше остаётся только знать МОДЕЛЬ каждого документа — набор полей.
+ */
+
+/** Список документов любого типа. */
+async function docList(p, module, { offset = 0, limit = 300, params = {} } = {}) {
+  const qs = new URLSearchParams({ _offset: String(offset), _limit: String(limit), ...params })
+  const r = await bankApi(p, 'GET', `/api/v1/${module}/list?${qs}`, null)
+  return r.json?.list || r.json?.data?.list || []
+}
+
+/** Один документ целиком. */
+async function docGet(p, module, id) {
+  const r = await bankApi(p, 'GET', `/api/v1/${module}/${encodeURIComponent(id)}`, null)
+  return r.json?.data || r.json
+}
+
+/** Серверные контроли. Возвращает список сообщений; пустой — значит чисто. */
+async function docValidate(p, module, model) {
+  const r = await bankApi(p, 'POST', `/api/v1/${module}/validate/tree`, model)
+  const d = r.json?.data || r.json
+  const messages = d?.messages || d?.controls || d?.errors || []
+  return { ok: !messages.some(m => /error|критич/i.test(m?.type || m?.level || '')), messages, raw: d }
+}
+
+/**
+ * Создать или изменить документ. Банк отвечает {result:true, id}.
+ * Именно так делает его фронт (useCreateOrEditDoc): POST на модуль для
+ * создания, PUT на модуль/id для правки.
+ */
+async function docSave(p, module, model, id) {
+  const r = id
+    ? await bankApi(p, 'PUT', `/api/v1/${module}/${encodeURIComponent(id)}`, { ...model, docId: id })
+    : await bankApi(p, 'POST', `/api/v1/${module}`, model)
+  const d = r.json?.data || r.json
+  if (!d?.result || !(d.id || id)) {
+    const msg = d?.outputMessages?.[0]?.message || d?.message || 'банк не сохранил документ'
+    throw new Error(msg)
+  }
+  return { id: d.id || id, state: d.state, raw: d }
+}
+
+/** Отправить документы в банк. */
+async function docSend(p, module, ids, confirmTransactionId) {
+  const r = await bankApi(p, 'POST', `/api/v1/${module}/send`, {
+    ids: ids.map(String), confirmTransactionId, userWorkspace: {},
+  })
+  const d = r.json?.data || r.json
+  const results = d?.results || []
+  return {
+    ok: results.some(e => e.result === 'success'),
+    error: results[0]?.message,
+    results,
+  }
+}
+
+/** Доступно ли действие над документом (_sign, _send, _delete и т.п.). */
+async function docCanDo(p, module, id, action) {
+  const r = await bankApi(p, 'GET',
+    `/api/v1/${module}/canDoAction/${encodeURIComponent(id)}?action=${encodeURIComponent(action)}`, null)
+  const d = r.json?.data || r.json
+  return !!d?.result
+}
+
 async function bankApi(p, method, path, body) {
   if (!sessionAuthToken) throw new Error('токен сессии банка не пойман')
   return p.evaluate(async ([m, u, b, t]) => {
@@ -2624,7 +2709,10 @@ async function reconTransferForm(username, password) {
 //   3) затем основная подпись (eToken PASS) уже с этим confirmTransactionId;
 //   4) отдельным шагом POST {module}/send — без него документ остаётся
 //      подписанным, но в банк не уходит.
-const SIGN_MODULE = 'doc/rur/payorders'   // рублёвые платёжки
+// Тип документа по умолчанию — рублёвая платёжка. Подпись у банка одинакова
+// для всех типов, поэтому модуль стал параметром: тем же кодом подписывается
+// валютный перевод, письмо в банк или заявка.
+const SIGN_MODULE = 'doc/rur/payorders'
 const PAYCONTROL_MODULE = 'client/paycontrol'
 const SIGN_OK = 'OK'                      // successSignResult из utils/sign.js
 
@@ -2633,16 +2721,16 @@ const SIGN_OK = 'OK'                      // successSignResult из utils/sign.j
 const isEToken    = t => /etoken.?pass/i.test(t || '')
 const isPayControl = t => /paycontrol/i.test(t || '')
 
-async function getCryptoProfiles(p, ids) {
-  const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/getUserCryptoProfiles`, { ids })
+async function getCryptoProfiles(p, ids, module = SIGN_MODULE) {
+  const r = await bankApi(p, 'POST', `/api/v1/${module}/getUserCryptoProfiles`, { ids })
   const list = r.json?.cryptoProfiles || r.json?.data?.cryptoProfiles || []
   console.log('[sign] средства подписи:', list.map(x =>
     `${x.typeName}${x.signAuthorityTypeCode === 'CONFIRM' && x.signConfirm ? ' (подтверждающая)' : ''}`).join(', ') || '—')
   return list
 }
 
-async function prepareSignCall(p, { cryptoProfileId, ids, confirmTransactionId }) {
-  const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/prepareSign`, {
+async function prepareSignCall(p, { cryptoProfileId, ids, confirmTransactionId, module = SIGN_MODULE }) {
+  const r = await bankApi(p, 'POST', `/api/v1/${module}/prepareSign`, {
     cryptoProfileId, ids, confirmTransactionId,
   })
   const d = r.json?.data || r.json
@@ -2661,12 +2749,12 @@ const signResultsOk = d => {
   return Array.isArray(rs) && rs.length > 0 && rs.every(s => s.result === SIGN_OK)
 }
 
-async function signStart(username, password, { id }) {
+async function signStart(username, password, { id, module = SIGN_MODULE }) {
   if (!id) throw new Error('не передан id документа')
   const p = await ensureLoggedIn(username, password)
   const ids = [String(id)]
 
-  const list = await getCryptoProfiles(p, ids)
+  const list = await getCryptoProfiles(p, ids, module)
   if (!list.length) throw new Error('у пользователя нет прав подписи этого документа')
 
   const forConfirm = list.filter(x => x.signAuthorityTypeCode === 'CONFIRM' && x.signConfirm)
@@ -2682,10 +2770,11 @@ async function signStart(username, password, { id }) {
 
   if (forConfirm.length) {
     const confirmProfile = forConfirm.find(x => isEToken(x.typeName)) || forConfirm[0]
-    const cd = await prepareSignCall(p, { cryptoProfileId: confirmProfile.id, ids })
+    const cd = await prepareSignCall(p, { cryptoProfileId: confirmProfile.id, ids, module })
     const serial = cd.result?.serialNumber || ''
     pendingSigns.set(String(id), {
       stage: 'needKey',                    // подтверждающая подпись ключом с токена
+      module,
       confirmTransactionId: cd.transactionId,
       mainProfileId: main.id,
       mainTypeName: main.typeName,
@@ -2701,20 +2790,22 @@ async function signStart(username, password, { id }) {
   }
 
   // Подтверждающей подписи нет — сразу основная.
-  return signPrepareMain(p, id, main, undefined)
+  return signPrepareMain(p, id, main, undefined, module)
 }
 
 // Основная подпись. Для PayControl подтверждение приходит в приложение на
 // телефоне, поэтому дальше клиента опрашиваем через signStatus.
-async function signPrepareMain(p, id, main, confirmTransactionId) {
+async function signPrepareMain(p, id, main, confirmTransactionId, module = SIGN_MODULE) {
   const d = await prepareSignCall(p, {
     cryptoProfileId: main.id,
     ids: [String(id)],
     confirmTransactionId,
+    module,
   })
   const viaPayControl = isPayControl(main.typeName)
   pendingSigns.set(String(id), {
     stage: viaPayControl ? 'payControl' : 'needKey',
+    module,
     transactionId: d.transactionId,
     pcOperationId: d.result?.pcOperationId,
     confirmTransactionId,
@@ -2750,7 +2841,7 @@ async function signStatus(username, password, { id }) {
   // и до подтверждения всегда отдаёт пустой signResults — опрос по нему висел
   // вечно. Через прокси вебсокет не поймать, поэтому смотрим самый надёжный
   // признак: состояние самого документа. Пока он «new» — подписи нет.
-  const state = await getDocState(p, id)
+  const state = await getDocState(p, id, pend.module)
   console.log('[sign] состояние документа:', state || '—')
 
   if (state && state !== 'new') {
@@ -2779,9 +2870,9 @@ async function signStatus(username, password, { id }) {
 }
 
 /** Текущее состояние документа по списку банка: самый надёжный признак подписи. */
-async function getDocState(p, id) {
+async function getDocState(p, id, module = SIGN_MODULE) {
   try {
-    const r = await bankApi(p, 'GET', `/api/v1/${SIGN_MODULE}/list?_offset=0&_limit=300`, null)
+    const r = await bankApi(p, 'GET', `/api/v1/${module}/list?_offset=0&_limit=300`, null)
     const list = r.json?.list || r.json?.data?.list || []
     return list.find(x => String(x.id) === String(id))?.state
   } catch (e) {
@@ -2800,7 +2891,7 @@ async function signSubmitKey(username, password, { id, key }) {
   // Ключом закрывается ТА транзакция, которая сейчас ждёт кода: обычно это
   // подтверждающая подпись eToken, а при её отсутствии — основная.
   const txId = pend.confirmTransactionId || pend.transactionId
-  const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/continueSign`, {
+  const r = await bankApi(p, 'POST', `/api/v1/${pend.module || SIGN_MODULE}/continueSign`, {
     model: { code: String(key) },
     transactionId: txId,
   })
@@ -2828,14 +2919,14 @@ async function signSubmitKey(username, password, { id, key }) {
   // Ключ приняли. Если это была подтверждающая подпись — переходим к основной
   // (PayControl), и только после неё документ уходит в банк.
   if (pend.mainProfileId) {
-    const list = await getCryptoProfiles(p, [String(id)])
+    const list = await getCryptoProfiles(p, [String(id)], pend.module)
     const main = list.find(x => x.id === pend.mainProfileId) || list.find(x => isPayControl(x.typeName))
     if (!main) throw new Error('средство основной подписи пропало из списка')
-    return signPrepareMain(p, id, main, pend.confirmTransactionId)
+    return signPrepareMain(p, id, main, pend.confirmTransactionId, pend.module)
   }
 
   pendingSigns.delete(String(id))
-  const sent = await sendDocument(p, id, pend.confirmTransactionId)
+  const sent = await sendDocument(p, id, pend.confirmTransactionId, pend.module)
   return sent.ok
     ? { stage: 'done', message: 'Документ подписан и отправлен в банк' }
     : { stage: 'signed', message: 'Документ подписан, но не отправлен: ' + sent.error }
@@ -2855,7 +2946,7 @@ async function signSyncToken(username, password, { id, firstKey, secondKey }) {
   const p = await ensureLoggedIn(username, password)
 
   const txId = pend.confirmTransactionId || pend.transactionId
-  const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/continueSign`, {
+  const r = await bankApi(p, 'POST', `/api/v1/${pend.module || SIGN_MODULE}/continueSign`, {
     model: { firstKey: String(firstKey), secondKey: String(secondKey) },
     transactionId: txId,
   })
@@ -2871,14 +2962,14 @@ async function signSyncToken(username, password, { id, firstKey, secondKey }) {
   // Синхронизация удалась и заодно закрыла подтверждающую подпись —
   // дальше обычный путь: основная подпись, затем отправка.
   if (pend.mainProfileId) {
-    const list = await getCryptoProfiles(p, [String(id)])
+    const list = await getCryptoProfiles(p, [String(id)], pend.module)
     const main = list.find(x => x.id === pend.mainProfileId) || list.find(x => isPayControl(x.typeName))
     if (!main) throw new Error('средство основной подписи пропало из списка')
-    return signPrepareMain(p, id, main, pend.confirmTransactionId)
+    return signPrepareMain(p, id, main, pend.confirmTransactionId, pend.module)
   }
 
   pendingSigns.delete(String(id))
-  const sent = await sendDocument(p, id, pend.confirmTransactionId)
+  const sent = await sendDocument(p, id, pend.confirmTransactionId, pend.module)
   return sent.ok
     ? { stage: 'done', message: 'Документ подписан и отправлен в банк' }
     : { stage: 'signed', message: 'Документ подписан, но не отправлен: ' + sent.error }
@@ -2906,9 +2997,9 @@ async function signCancel(username, password, { id }) {
 }
 
 // POST {module}/send {ids, confirmTransactionId, userWorkspace}
-async function sendDocument(p, id, confirmTransactionId) {
+async function sendDocument(p, id, confirmTransactionId, module = SIGN_MODULE) {
   try {
-    const r = await bankApi(p, 'POST', `/api/v1/${SIGN_MODULE}/send`, {
+    const r = await bankApi(p, 'POST', `/api/v1/${module}/send`, {
       ids: [String(id)],
       confirmTransactionId,
       userWorkspace: {},
@@ -3081,4 +3172,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, ensureLoggedIn, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi }
