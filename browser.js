@@ -80,6 +80,11 @@ async function ensureLoggedIn(username, password) {
     console.error('[browser] Форма входа не появилась.')
     console.error('[browser] URL:', seen.url, '| Заголовок:', seen.title)
     console.error('[browser] Страница:', seen.text || '(пусто)')
+    // Плановые работы банка — не поломка приложения. Человеку важно понимать
+    // разницу: тут нечего чинить и незачем перебирать пароль, надо просто ждать.
+    if (/техническ\w*\s+работ/i.test(seen.text)) {
+      throw new Error('В банке идут технические работы. Интернет-банк временно недоступен — попробуйте позже')
+    }
     throw new Error(
       seen.text
         ? 'Банк не показал форму входа. Ответ банка: ' + seen.text.slice(0, 200)
