@@ -58,6 +58,23 @@ function dbo() {
 /** Есть ли чем ходить в банк прямо сейчас. */
 const hasCreds = () => !!dbo()
 
+/**
+ * Банк отверг именно логин с паролем — или просто не смог сейчас ответить?
+ * Разница принципиальна: в первом случае пароль надо стереть, во втором —
+ * сохранить, иначе человека выбрасывает на экран входа из-за причин, к
+ * его паролю отношения не имеющих.
+ */
+function isWrongCredentials(message = '') {
+  const m = String(message).toLowerCase()
+  // Явный отказ по учётным данным. \w не покрывает кириллицу, поэтому
+  // окончания слов задаём явным диапазоном [а-яё].
+  if (/невер[а-яё]*\s+(логин|пароль|учет|учёт)|invalid\s+(login|password|credentials)|неправильн[а-яё]*\s+(логин|пароль)|заблокирован/.test(m)) {
+    return true
+  }
+  // Всё остальное — про доступность банка, а не про пароль
+  return false
+}
+
 if (!ENV_LOGIN || !ENV_PASSWORD) {
   console.log('[auth] пароль ДБО на сервере не хранится — ожидается вход владельца')
 }
@@ -86,6 +103,36 @@ app.use(cors({
   credentials: true,
 }))
 app.use(express.json())
+
+// ─── Журнал запросов ────────────────────────────────────────────────────────
+// Без него не видно, КТО обращается к сервису: при разборе сбоев было неясно,
+// почему сразу после успешного входа приходит выход и пароль стирается.
+// Пишем строку на каждый запрос: путь, источник, устройство, код и время
+// ответа. Пароли и токены в журнал не попадают.
+const shortAgent = (ua = '') => {
+  if (/iPhone|iPad/i.test(ua)) return 'iPhone'
+  if (/Android/i.test(ua)) return 'Android'
+  if (/Chrome\//i.test(ua)) return 'Chrome'
+  if (/Safari\//i.test(ua)) return 'Safari'
+  if (/curl|PowerShell|node|python/i.test(ua)) return 'консоль'
+  return ua ? ua.slice(0, 22) : '—'
+}
+
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next()
+  const started = Date.now()
+  const from = req.get('origin') || req.get('referer') || '—'
+  const who = shortAgent(req.get('user-agent'))
+  res.on('finish', () => {
+    const ms = Date.now() - started
+    // Выход стирает пароль из памяти, поэтому его источник фиксируем всегда
+    const mark = req.path === '/api/logout' ? ' ВЫХОД' : ''
+    console.log(
+      `[req]${mark} ${req.method} ${req.path} <- ${who} ${from} :: ${res.statusCode} за ${ms} мс`
+    )
+  })
+  next()
+})
 
 // Проверка токена. /health оставляем открытым — по нему хостинг следит за живостью.
 app.use((req, res, next) => {
@@ -187,10 +234,17 @@ app.post('/api/login', async (req, res) => {
     getWhoAmI(login, password)
       .then(name => { if (name) { cachedWhoAmI = name; console.log('[login] вход выполнен:', name); audit('auth.login', 'ok', { name }) } })
       .catch(err => {
-        // Банк не пустил — держать неверный пароль в памяти незачем
         console.error('[login] вход не удался:', err.message)
         audit('auth.login', 'error', { login, reason: err.message })
-        if (liveSession?.password === password) liveSession = null
+        // Стираем пароль ТОЛЬКО если банк отверг сами учётные данные.
+        // Раньше стирали при любой неудаче — и человека выбрасывало на
+        // экран входа через пару минут, стоило банку ответить «временное
+        // ограничение», уйти на техработы или просто задуматься.
+        // Такие ошибки о правильности пароля не говорят ничего.
+        if (isWrongCredentials(err.message) && liveSession?.password === password) {
+          liveSession = null
+          console.log('[auth] банк отверг учётные данные — пароль стёрт')
+        }
       })
       .finally(() => { whoAmIWarming = false })
   }
@@ -840,7 +894,14 @@ app.get('/api/audit', (req, res) => {
   res.json({ success: true, data: auditTail(limit) })
 })
 
-app.post('/api/logout', async (_, res) => {
+app.post('/api/logout', async (req, res) => {
+  // Кто именно инициировал выход — записываем всегда. Выход стирает пароль,
+  // и без источника невозможно понять, почему сессия обрывается сама.
+  const from = req.get('origin') || req.get('referer') || '—'
+  const who = shortAgent(req.get('user-agent'))
+  console.log(`[auth] запрос выхода от ${who} ${from}`)
+  audit('auth.logout', 'info', { origin: from, agent: who, ip: req.ip })
+
   // Выход обязан стирать пароль из памяти, а не только закрывать браузер:
   // иначе после «выхода» сервис продолжал бы ходить в банк под владельцем.
   liveSession = null
