@@ -3492,7 +3492,54 @@ const signResultsOk = d => {
   return Array.isArray(rs) && rs.length > 0 && rs.every(s => s.result === SIGN_OK)
 }
 
-async function signStart(username, password, { id, module = SIGN_MODULE }) {
+// Человекочитаемый вид средства подписи и способ, которым оно спросит человека.
+// `kind` нужен приложению, чтобы заранее сказать, что готовить: токен, телефон
+// или ожидание СМС.
+function describeMean(x) {
+  const t = String(x.typeName || '')
+  const kind = isEToken(t) ? 'etoken' : isPayControl(t) ? 'payControl' : /sms/i.test(t) ? 'sms' : 'other'
+  return {
+    id: x.id,
+    typeName: t,
+    kind,
+    label: kind === 'etoken' ? 'Ключ с токена eToken'
+      : kind === 'payControl' ? 'Подтверждение в PayControl'
+        : kind === 'sms' ? 'Код из СМС' : t || 'Средство подписи',
+    confirming: x.signAuthorityTypeCode === 'CONFIRM' && !!x.signConfirm,
+  }
+}
+
+/**
+ * Какими средствами можно подписать документ.
+ *
+ * Отдельный вызов нужен, чтобы приложение могло показать выбор ДО начала
+ * подписи: `getUserCryptoProfiles` попытку ввода ключа не расходует, в отличие
+ * от `prepareSign`. Поэтому список можно запрашивать спокойно.
+ *
+ * Возвращает подтверждающие и основные средства раздельно и подсказывает
+ * рекомендуемые: подтверждающая — eToken, основная — PayControl (её
+ * подтверждают на телефоне, тогда как СМС потребовала бы ещё и код).
+ */
+async function signMeans(username, password, { id, module = SIGN_MODULE }) {
+  if (!id) throw new Error('не передан id документа')
+  const p = await ensureLoggedIn(username, password)
+  const list = await getCryptoProfiles(p, [String(id)], module)
+  if (!list.length) throw new Error('у пользователя нет прав подписи этого документа')
+
+  const confirming = list.filter(x => x.signAuthorityTypeCode === 'CONFIRM' && x.signConfirm).map(describeMean)
+  const main = list.filter(x => x.signAuthorityTypeCode !== 'CONFIRM' || !x.signConfirm).map(describeMean)
+
+  return {
+    confirming,
+    main,
+    recommended: {
+      confirmProfileId: (confirming.find(m => m.kind === 'etoken') || confirming[0])?.id || null,
+      mainProfileId: (main.find(m => m.kind === 'payControl') || main[0])?.id || null,
+    },
+  }
+}
+
+async function signStart(username, password, { id, module = SIGN_MODULE, confirmProfileId = '', mainProfileId = '' }) {
   if (!id) throw new Error('не передан id документа')
   const p = await ensureLoggedIn(username, password)
   const ids = [String(id)]
@@ -3504,15 +3551,16 @@ async function signStart(username, password, { id, module = SIGN_MODULE }) {
   const forSign    = list.filter(x => x.signAuthorityTypeCode !== 'CONFIRM' || !x.signConfirm)
   if (!forSign.length) throw new Error('есть только подтверждающая подпись — подписать документ нечем')
 
-  // У этого клиента средств подписи три: SmsCrypto, PayControl и eTokenPass,
-  // причём ПОДТВЕРЖДАЮЩАЯ — именно eToken. Отсюда и привычный владельцу
-  // порядок: сперва ключ с токена, потом подтверждение в PayControl.
-  // Основной подписью выбираем PayControl: подтверждение приходит на телефон,
-  // тогда как SmsCrypto потребовал бы ещё и код из СМС.
-  const main = forSign.find(x => isPayControl(x.typeName)) || forSign[0]
+  // Средства подписи выбирает человек, если у него их несколько. Когда выбор
+  // не передан, берём привычный порядок этого клиента: подтверждающая — eToken,
+  // основная — PayControl (подтверждение приходит на телефон, тогда как
+  // SmsCrypto потребовал бы ещё и код из СМС).
+  const main = (mainProfileId && forSign.find(x => x.id === mainProfileId))
+    || forSign.find(x => isPayControl(x.typeName)) || forSign[0]
 
   if (forConfirm.length) {
-    const confirmProfile = forConfirm.find(x => isEToken(x.typeName)) || forConfirm[0]
+    const confirmProfile = (confirmProfileId && forConfirm.find(x => x.id === confirmProfileId))
+      || forConfirm.find(x => isEToken(x.typeName)) || forConfirm[0]
     const cd = await prepareSignCall(p, { cryptoProfileId: confirmProfile.id, ids, module })
     const serial = cd.result?.serialNumber || ''
     pendingSigns.set(String(id), {
@@ -3529,7 +3577,16 @@ async function signStart(username, password, { id, module = SIGN_MODULE }) {
       startedAt: Date.now(),
     })
     console.log('[sign] подтверждающая подпись:', confirmProfile.typeName, '| серийник:', serial)
-    return { stage: 'needKey', serial, attempts: cd.result?.cryptoParamsModel?.maxAttempts }
+    // Возвращаем и то, чем подписываем сейчас, и то, что попросят следующим:
+    // человек должен заранее понимать, что после кода с токена придётся
+    // подтвердить операцию на телефоне.
+    return {
+      stage: 'needKey',
+      serial,
+      attempts: cd.result?.cryptoParamsModel?.maxAttempts,
+      mean: describeMean(confirmProfile),
+      next: describeMean(main),
+    }
   }
 
   // Подтверждающей подписи нет — сразу основная.
@@ -3561,10 +3618,12 @@ async function signPrepareMain(p, id, main, confirmTransactionId, module = SIGN_
       // Банк даёт QR: его можно отсканировать в «Центр-инвест Бизнес»,
       // если подтверждение не пришло в приложение само.
       qrCode: d.qrCode || d.result?.qrCode || undefined,
+      mean: describeMean(main),
       message: 'Подтвердите операцию в приложении PayControl на телефоне' }
   }
   return { stage: 'needKey', serial: d.result?.serialNumber || '',
-    attempts: d.result?.cryptoParamsModel?.maxAttempts }
+    attempts: d.result?.cryptoParamsModel?.maxAttempts,
+    mean: describeMean(main) }
 }
 
 // Опрос подтверждения в PayControl. Пока клиент не нажал в приложении —
@@ -3915,4 +3974,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi, getBanners, getBannerImage }
+module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signMeans, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi, getBanners, getBannerImage }

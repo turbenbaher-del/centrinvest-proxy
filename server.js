@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi, getBanners, getBannerImage } = require('./browser')
+const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signMeans, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi, getBanners, getBannerImage } = require('./browser')
 const { audit, auditTail, maskAccount } = require('./audit')
 const { getAcquiring } = require('./acquiring')
 const { prepareTariffChange, signTariffChange } = require('./tariff')
@@ -461,9 +461,25 @@ app.get('/api/documents', async (_, res) => {
 
 // Подпись документа — двухшаговый поток с вводом ключа eToken.
 // Шаг 1: отправить на подпись и получить серийник токена для окна ввода.
-app.post('/api/documents/:id/sign/start', async (req, res) => {
+// Чем можно подписать документ. Отдельный маршрут нужен, чтобы приложение
+// показало выбор ДО начала подписи: этот запрос попытку ввода ключа НЕ
+// расходует, в отличие от самого старта подписи.
+app.get('/api/documents/:id/sign/means', async (req, res) => {
   try {
-    const data = await signStart(dbo().login, dbo().password, { id: req.params.id })
+    const data = await signMeans(dbo().login, dbo().password, { id: req.params.id })
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[sign means]', err.message)
+    res.status(400).json({ success: false, error: err.message })
+  }
+})
+
+app.post('/api/documents/:id/sign/start', async (req, res) => {
+  const { confirmProfileId = '', mainProfileId = '' } = req.body || {}
+  try {
+    const data = await signStart(dbo().login, dbo().password, {
+      id: req.params.id, confirmProfileId, mainProfileId,
+    })
     audit('sign.start', 'ok', { docId: req.params.id, stage: data.stage, serial: data.serial })
     res.json({ success: true, data })
   } catch (err) {
