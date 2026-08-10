@@ -459,6 +459,12 @@ app.get('/api/documents', async (_, res) => {
   }
 })
 
+/** Текст отказа банка из ответа подписи: там он лежит в `errors`. */
+function bankError(data) {
+  const list = Array.isArray(data?.errors) ? data.errors.filter(Boolean) : []
+  return list.join('; ') || data?.message || 'банк отклонил операцию подписи'
+}
+
 // Подпись документа — двухшаговый поток с вводом ключа eToken.
 // Шаг 1: отправить на подпись и получить серийник токена для окна ввода.
 // Чем можно подписать документ. Отдельный маршрут нужен, чтобы приложение
@@ -501,7 +507,14 @@ app.get('/api/documents/:id/sign/status', async (req, res) => {
       audit('sign.finish', data.stage === 'error' ? 'error' : 'ok',
         { docId: req.params.id, stage: data.stage, message: data.message, error: (data.errors || [])[0] })
     }
-    res.json({ success: data.stage !== 'error', data })
+    // Отказ банка отдаём вместе с ЕГО текстом. Без поля `error` приложение
+    // показывало «Ошибка сервиса банка (200)»: причина — «документ отклонён»,
+    // «подтверждение не пришло» — терялась ровно там, где она нужна.
+    res.json({
+      success: data.stage !== 'error',
+      error: data.stage === 'error' ? bankError(data) : undefined,
+      data,
+    })
   } catch (err) {
     console.error('[sign status]', err.message)
     res.status(400).json({ success: false, error: err.message })
@@ -517,7 +530,11 @@ app.post('/api/documents/:id/sign/sync', async (req, res) => {
     audit('sign.sync', data.stage === 'error' ? 'error' : 'ok',
       { docId: req.params.id, stage: data.stage })
     invalidateCache()
-    res.json({ success: data.stage !== 'error', data })
+    res.json({
+      success: data.stage !== 'error',
+      error: data.stage === 'error' ? bankError(data) : undefined,
+      data,
+    })
   } catch (err) {
     console.error('[sign sync]', err.message)
     res.status(400).json({ success: false, error: err.message })
@@ -545,7 +562,13 @@ app.post('/api/documents/:id/sign/key', async (req, res) => {
     // Сам ключ в журнал не попадает — только факт ввода и итог
     audit('sign.key', data.stage === 'error' ? 'error' : 'ok',
       { docId: req.params.id, stage: data.stage, error: (data.errors || [])[0] })
-    res.json({ success: data.stage !== 'error', data })
+    // «Ключ не принят, осталось 2 попытки» — это ответ банка, и человек
+    // должен увидеть именно его, а не код состояния HTTP.
+    res.json({
+      success: data.stage !== 'error',
+      error: data.stage === 'error' ? bankError(data) : undefined,
+      data,
+    })
   } catch (err) {
     console.error('[sign key]', err.message)
     audit('sign.key', 'error', { docId: req.params.id, error: err.message })
