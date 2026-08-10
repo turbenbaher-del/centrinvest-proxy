@@ -3497,14 +3497,19 @@ const signResultsOk = d => {
 // или ожидание СМС.
 function describeMean(x) {
   const t = String(x.typeName || '')
-  const kind = isEToken(t) ? 'etoken' : isPayControl(t) ? 'payControl' : /sms/i.test(t) ? 'sms' : 'other'
+  // Имена банк пишет по-разному: в списке средств у клиента видно
+  // «OneTimePassword» и «PayControl», а в константах его фронта —
+  // «SmsCrypto» и «приложение PayControl». Опознаём по подстроке.
+  const kind = isEToken(t) ? 'etoken'
+    : isPayControl(t) ? 'payControl'
+      : /sms|onetimepassword|otp/i.test(t) ? 'otp' : 'other'
   return {
     id: x.id,
     typeName: t,
     kind,
     label: kind === 'etoken' ? 'Ключ с токена eToken'
       : kind === 'payControl' ? 'Подтверждение в PayControl'
-        : kind === 'sms' ? 'Код из СМС' : t || 'Средство подписи',
+        : kind === 'otp' ? 'Одноразовый пароль (СМС)' : t || 'Средство подписи',
     confirming: x.signAuthorityTypeCode === 'CONFIRM' && !!x.signConfirm,
   }
 }
