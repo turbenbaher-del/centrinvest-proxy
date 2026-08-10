@@ -3570,6 +3570,7 @@ async function signStart(username, password, { id, module = SIGN_MODULE, confirm
     const serial = cd.result?.serialNumber || ''
     pendingSigns.set(String(id), {
       stage: 'needKey',                    // подтверждающая подпись ключом с токена
+      phase: 'confirm',                    // код закрывает подтверждающую транзакцию
       module,
       confirmTransactionId: cd.transactionId,
       mainProfileId: main.id,
@@ -3610,11 +3611,16 @@ async function signPrepareMain(p, id, main, confirmTransactionId, module = SIGN_
   const viaPayControl = isPayControl(main.typeName)
   pendingSigns.set(String(id), {
     stage: viaPayControl ? 'payControl' : 'needKey',
+    // Метка шага: дальше код от человека закрывает ОСНОВНУЮ транзакцию,
+    // а не подтверждающую. Без неё код из СМС уходил в уже закрытую
+    // транзакцию eToken, и банк его не принимал.
+    phase: 'main',
     module,
     transactionId: d.transactionId,
     pcOperationId: d.result?.pcOperationId,
     confirmTransactionId,
     serial: d.result?.serialNumber || '',
+    attemptsLeft: d.result?.cryptoParamsModel?.maxAttempts ?? 3,
     startedAt: Date.now(),
   })
   console.log('[sign] основная подпись:', main.typeName, '| txId:', d.transactionId)
@@ -3704,7 +3710,9 @@ async function signSubmitKey(username, password, { id, key }) {
   //   needKey    — ключ с eToken закрывает ПОДТВЕРЖДАЮЩУЮ транзакцию;
   //   payControl — код из PayControl закрывает ОСНОВНУЮ.
   // Раньше здесь всегда бралась подтверждающая, и код PayControl уходил не туда.
-  const txId = pend.stage === 'payControl'
+  // На шаге основной подписи (СМС или PayControl) код закрывает ОСНОВНУЮ
+  // транзакцию, на шаге подтверждающей — подтверждающую.
+  const txId = pend.phase === 'main'
     ? (pend.transactionId || pend.confirmTransactionId)
     : (pend.confirmTransactionId || pend.transactionId)
   const r = await bankApi(p, 'POST', `/api/v1/${pend.module || SIGN_MODULE}/continueSign`, {
