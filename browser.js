@@ -3619,6 +3619,9 @@ async function signPrepareMain(p, id, main, confirmTransactionId, module = SIGN_
       // если подтверждение не пришло в приложение само.
       qrCode: d.qrCode || d.result?.qrCode || undefined,
       mean: describeMean(main),
+      // Сколько раз можно ввести код подтверждения. У банка это
+      // cryptoParamsModel.confirmAttempts в диалоге PayControl.
+      attempts: d.result?.cryptoParamsModel?.confirmAttempts,
       message: 'Подтвердите операцию в приложении PayControl на телефоне' }
   }
   return { stage: 'needKey', serial: d.result?.serialNumber || '',
@@ -3687,12 +3690,18 @@ async function signSubmitKey(username, password, { id, key }) {
   // continueSign {model:{code}, transactionId} — ключ токена идёт в model.code
   if (!key) throw new Error('не передан ключ токена')
   const pend = pendingSigns.get(String(id))
-  if (!pend || pend.stage !== 'needKey') throw new Error('подпись не начата или истекла — начните заново')
+  if (!pend || !['needKey', 'payControl'].includes(pend.stage)) {
+    throw new Error('подпись не начата или истекла — начните заново')
+  }
   const p = await ensureLoggedIn(username, password)
 
-  // Ключом закрывается ТА транзакция, которая сейчас ждёт кода: обычно это
-  // подтверждающая подпись eToken, а при её отсутствии — основная.
-  const txId = pend.confirmTransactionId || pend.transactionId
+  // Куда слать код — зависит от того, какой шаг сейчас ждёт ввода:
+  //   needKey    — ключ с eToken закрывает ПОДТВЕРЖДАЮЩУЮ транзакцию;
+  //   payControl — код из PayControl закрывает ОСНОВНУЮ.
+  // Раньше здесь всегда бралась подтверждающая, и код PayControl уходил не туда.
+  const txId = pend.stage === 'payControl'
+    ? (pend.transactionId || pend.confirmTransactionId)
+    : (pend.confirmTransactionId || pend.transactionId)
   const r = await bankApi(p, 'POST', `/api/v1/${pend.module || SIGN_MODULE}/continueSign`, {
     model: { code: String(key) },
     transactionId: txId,
@@ -3704,10 +3713,25 @@ async function signSubmitKey(username, password, { id, key }) {
     const msg = d?.outputMessages?.[0]?.message
       || (d?.signResults || []).map(s => s.message).filter(Boolean)[0]
       || 'ключ не принят'
+
+    // Код «-1» у банка означает не отказ, а «операция ещё не подтверждена»:
+    // человек нажал «Подтвердить» раньше, чем подтвердил в приложении
+    // PayControl. Фронт банка в этом случае просто продолжает ждать события.
+    if ((d?.outputMessages || []).some(m => String(m?.code) === '-1')) {
+      pendingSigns.set(String(id), pend)
+      return { stage: 'confirm', confirmType: 'payControl', waiting: true,
+        message: msg || 'Операция ещё не подтверждена в PayControl' }
+    }
     // Попытки конечны. Когда они исчерпаны, банк не блокирует токен сразу:
     // при включённой автосинхронизации он просит ввести ДВА ключа подряд,
-    // чтобы заново совпасть со счётчиком устройства.
+    // чтобы заново совпасть со счётчиком устройства. Это про eToken —
+    // к подтверждению PayControl синхронизация отношения не имеет.
     pend.attemptsLeft = (pend.attemptsLeft ?? 1) - 1
+    if (pend.stage === 'payControl') {
+      pendingSigns.set(String(id), pend)
+      return { stage: 'confirm', confirmType: 'payControl',
+        attemptsLeft: pend.attemptsLeft, errors: [msg] }
+    }
     if (pend.attemptsLeft <= 0 && pend.autoSyncEnabled) {
       pend.stage = 'sync'
       pendingSigns.set(String(id), pend)
