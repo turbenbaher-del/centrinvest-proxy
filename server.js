@@ -767,6 +767,27 @@ async function loadAllOperations() {
   return stmtCache.pending
 }
 
+// Банк присылает одну и ту же операцию по нескольку раз (проверено на живых
+// данных 10.08.2026: от 2 до 6 копий). Записи совпадают полностью — дата,
+// номер документа, сумма, назначение, обе стороны, — различается только `id`,
+// который у банка одноразовый и меняется от запроса к запросу. Без склейки
+// выписка показывает каждый платёж несколько раз, а итоги «Поступления» и
+// «Списания» завышаются во столько же раз: это прямая ложь о деньгах.
+// Ключ намеренно включает назначение и счёт стороны — два разных платежа
+// с одинаковой суммой в один день различаются как минимум номером документа.
+function dedupeOperations(list) {
+  const seen = new Set()
+  return list.filter(o => {
+    const key = [
+      o.date, o.number, o.amount, o.direction,
+      o.account, o.counterparty?.account, o.purpose,
+    ].join('|')
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 // Имя /api/statement уже занято выгрузкой файла выписки из банка,
 // поэтому список операций живёт по адресу /api/operations.
 app.get('/api/operations', async (req, res) => {
@@ -784,8 +805,9 @@ app.get('/api/operations', async (req, res) => {
         accounts: account ? [account] : undefined,
       })
       if (fresh.length) {
-        console.log('[operations] сортировка банка:', fresh.length, '| свежая:', fresh[0]?.date)
-        return res.json({ success: true, total: fresh.length, data: fresh })
+        const uniq = dedupeOperations(fresh)
+        console.log('[operations] сортировка банка:', fresh.length, '| без дублей:', uniq.length, '| свежая:', uniq[0]?.date)
+        return res.json({ success: true, total: uniq.length, data: uniq })
       }
     } catch (e) {
       console.warn('[operations] поиск с сортировкой не удался, беру страницами:', e.message)
@@ -806,7 +828,9 @@ app.get('/api/operations', async (req, res) => {
     // Отдаём разобранными: приложению нужны знак суммы, направление и
     // контрагент, а не сырые поля банка. Дебет или кредит определяется
     // наличием суммы — так же считает фронт самого банка.
-    const data = ops.slice(0, limit).map(o => {
+    // Дубли снимаем ДО обрезки по limit, иначе в ответ попадёт меньше
+    // операций, чем просили, а часть страницы окажется потерянной.
+    const mapped = ops.map(o => {
       const debit = !!o.debet && Number(o.debet) !== 0
       const party = debit ? o.receiver : o.payer
       return {
@@ -828,7 +852,9 @@ app.get('/api/operations', async (req, res) => {
         status: 'Исполнен',
       }
     })
-    res.json({ success: true, total: ops.length, data })
+    const uniq = dedupeOperations(mapped)
+    console.log('[operations] страницами:', mapped.length, '| без дублей:', uniq.length)
+    res.json({ success: true, total: uniq.length, data: uniq.slice(0, limit) })
   } catch (err) {
     console.error('[statement]', err.message)
     res.status(500).json({ success: false, error: err.message })
