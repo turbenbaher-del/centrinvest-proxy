@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signMeans, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi, getBanners, getBannerImage } = require('./browser')
+const { getMustRead, confirmMustRead, getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signMeans, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi, getBanners, getBannerImage } = require('./browser')
 const { audit, auditTail, maskAccount } = require('./audit')
 const { getAcquiring } = require('./acquiring')
 const { prepareTariffChange, signTariffChange } = require('./tariff')
@@ -1064,6 +1064,28 @@ app.get('/api/recon/call', async (req, res) => {
 
 // Журнал действий: что происходило, когда и чем закончилось.
 // Секретов не содержит, номера счетов маскированы.
+// Письмо банка, обязательное к прочтению. Банк показывает его поверх
+// интерфейса и до подтверждения ознакомления считает, что клиент письмо
+// не видел. Сервис такие письма НЕ подтверждает сам: он отдаёт письмо
+// приложению, а подтверждение делает человек отдельным действием.
+app.get('/api/mustread', (_req, res) => {
+  const m = getMustRead()
+  res.json({ success: true, data: m ? { text: m.text, seenAt: m.seenAt } : null })
+})
+
+app.post('/api/mustread/confirm', async (req, res) => {
+  try {
+    const r = await confirmMustRead(dbo().login, dbo().password)
+    audit('mail.mustRead', r.confirmed ? 'ok' : 'error', { reason: r.reason })
+    if (!r.confirmed) return res.status(400).json({ success: false, error: r.reason })
+    invalidateCache()
+    res.json({ success: true, data: r })
+  } catch (err) {
+    console.error('[mustread]', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
 app.get('/api/audit', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 200, 500)
   res.json({ success: true, data: auditTail(limit) })

@@ -6,6 +6,10 @@ let sessionExpiry = 0
 let sessionAuthToken = null      // токен API банка из текущей сессии
 let cachedAccounts = []          // last successful accounts fetch
 let cachedApiResponses = []      // all JSON API responses from last full navigation
+// Письмо банка «обязательно к прочтению»: банк показывает его поверх
+// интерфейса и ждёт подтверждения ознакомления. Подтверждать за человека
+// нельзя, поэтому просто запоминаем и отдаём приложению.
+let pendingMustRead = null
 
 const BASE = 'https://dbo.centrinvest.ru/sbns-web'
 const LOGIN_URL = `${BASE}/ru/html/login.html`
@@ -208,15 +212,25 @@ async function waitForAppReady(p, timeoutMs = 60000) {
   const MARKERS = /Счета и платежи|СОБСТВЕННЫЕ СРЕДСТВА|Контрагенты|Мои документы/i
 
   while (Date.now() - started < timeoutMs) {
-    // Модальное окно «обязательно к прочтению» перекрывает интерфейс и мешает отрисовке
+    // Окно «обязательно к прочтению» перекрывает интерфейс. Раньше здесь
+    // вслепую нажималась последняя кнопка окна — то есть сервис мог сам
+    // подтверждать ознакомление с письмом банка, которого человек не видел.
+    // Так делать нельзя: подтверждение прочтения — действие клиента.
+    // Теперь письмо запоминается и отдаётся приложению (GET /api/mustread),
+    // а окно временно убирается с экрана, чтобы читать данные было можно.
     try {
-      await p.evaluate(() => {
+      const found = await p.evaluate(() => {
         const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
-        if (m) {
-          const bs = Array.from(m.querySelectorAll('button,[role=button]'))
-          const b = bs[bs.length - 1]; if (b) b.click(); else m.remove()
-        }
+        if (!m) return null
+        const text = (m.innerText || '').replace(/\s+/g, ' ').trim()
+        m.setAttribute('data-pva-hidden', '1')
+        m.style.display = 'none'
+        return text.slice(0, 4000)
       })
+      if (found) {
+        pendingMustRead = { text: found, seenAt: Date.now() }
+        console.log('[browser] банк показал письмо, обязательное к прочтению — жду подтверждения человека')
+      }
     } catch {}
 
     const text = await p.evaluate(() => document.body.innerText || '').catch(() => '')
@@ -1016,6 +1030,55 @@ async function getWhoAmI(username, password) {
     return null
   })
   return name
+}
+
+/**
+ * Письмо банка, обязательное к прочтению.
+ *
+ * Банк выводит его поверх интерфейса при входе или при первом же обращении
+ * к серверу и ждёт подтверждения ознакомления (Руководство пользователя БСС,
+ * разд. 2.4.3). Подтверждение — юридически значимое действие клиента, поэтому
+ * сервис его НЕ делает: он только показывает письмо приложению.
+ */
+function getMustRead() {
+  return pendingMustRead
+}
+
+/**
+ * Подтвердить прочтение — строго по явной команде человека.
+ * Возвращаем окно на экран, жмём кнопку подтверждения и отвечаем «Да»
+ * на вопрос банка. Текст письма остаётся в журнале сервиса.
+ */
+async function confirmMustRead(username, password) {
+  if (!pendingMustRead) return { confirmed: false, reason: 'нет письма, ждущего подтверждения' }
+  const p = await ensureLoggedIn(username, password)
+
+  const done = await p.evaluate(async () => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+    const box = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+    if (!box) return { ok: false, reason: 'окно письма уже закрыто банком' }
+    box.style.display = ''
+    box.removeAttribute('data-pva-hidden')
+
+    // Кнопка подтверждения в самом окне письма
+    const btns = Array.from(box.querySelectorAll('button,[role=button]'))
+    const confirm = btns.find(b => /подтверд|прочит|ознакомл/i.test(b.innerText || '')) || btns[btns.length - 1]
+    if (!confirm) return { ok: false, reason: 'в окне письма нет кнопки подтверждения' }
+    confirm.click()
+    await sleep(1200)
+
+    // Банк переспрашивает: «Подтвердить прочтение?» — отвечаем «Да»
+    const yes = Array.from(document.querySelectorAll('button,[role=button]'))
+      .find(b => /^\s*да\s*$/i.test(b.innerText || ''))
+    if (yes) { yes.click(); await sleep(800) }
+    return { ok: true }
+  }).catch(e => ({ ok: false, reason: e.message }))
+
+  if (done.ok) {
+    console.log('[mustread] человек подтвердил прочтение письма банка')
+    pendingMustRead = null
+  }
+  return { confirmed: !!done.ok, reason: done.reason || '' }
 }
 
 async function closeBrowser() {
@@ -4067,4 +4130,4 @@ async function reconDocuments(username, password) {
   }
 }
 
-module.exports = { getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signMeans, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi, getBanners, getBannerImage }
+module.exports = { getMustRead, confirmMustRead, getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signMeans, signStatus, signSubmitKey, signSyncToken, signCancel, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi, getBanners, getBannerImage }
