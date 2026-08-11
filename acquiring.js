@@ -151,6 +151,11 @@ async function getAcquiring(creds, { key = 'terminals', from = '', to = '', sear
   }
 
   const rows = order.filter(r => Object.keys(r).length)
+  // Упёрлись в собственный потолок — «есть ещё» обещать нельзя: приложение
+  // растило limit дальше, получало тот же список и показывало кнопку
+  // «Показать ещё», которая ничего не меняла. Говорим об этом отдельным
+  // признаком, чтобы экран предложил сузить период, а не жать впустую.
+  const capped = want >= LIMIT_MAX && rows.length >= LIMIT_MAX
   return {
     key,
     title: spec.title,
@@ -159,7 +164,9 @@ async function getAcquiring(creds, { key = 'terminals', from = '', to = '', sear
     columns,
     rows: rows.slice(0, want),
     total: Math.min(rows.length, want),
-    hasMore: growing && rows.length >= want,
+    hasMore: growing && rows.length >= want && !capped,
+    capped,
+    limitMax: LIMIT_MAX,
     tabs,
   }
 }
