@@ -1639,10 +1639,20 @@ async function downloadStatement(username, password, { account = '', dateFrom, d
   }
   const dialogOf = (cmds) => cmds.find(c => /confirmDialog/.test(c.instanceName || ''))
   const errorOf = (cmds) => cmds.find(c => /errorDialog/.test(c.instanceName || ''))
+  // Текст банк кладёт по-разному: в `message`, в `text`, а у части окон —
+  // списком в `messages`. Читая только `message`, мы получали пустую строку
+  // и писали «банк запросил подтверждение, которого мы не ожидали», хотя
+  // вопрос был, и человек не понимал, о чём его спросили.
   const msgOf = (c) => {
-    const m = c?.fields?.message || c?.fields?.text
-    const v = m && typeof m === 'object' ? m.value : m
-    return String(v || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+    const f = c?.fields || {}
+    const parts = []
+    for (const key of ['message', 'text', 'messages']) {
+      const m = f[key]
+      const v = m && typeof m === 'object' && !Array.isArray(m) ? m.value : m
+      if (Array.isArray(v)) parts.push(...v.map(x => (x && typeof x === 'object' ? x.value ?? x.message ?? '' : x)))
+      else if (v) parts.push(v)
+    }
+    return parts.join(' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
   }
 
   // 1. Форма счетов
@@ -2520,7 +2530,7 @@ async function docCanDo(p, module, id, action) {
   return !!d?.result
 }
 
-async function bankApi(p, method, path, body) {
+async function bankApiRaw(p, method, path, body) {
   if (!sessionAuthToken) throw new Error('токен сессии банка не пойман')
   return p.evaluate(async ([m, u, b, t]) => {
     const res = await fetch('https://dbo.centrinvest.ru' + u, {
@@ -2531,6 +2541,36 @@ async function bankApi(p, method, path, body) {
     })
     return { status: res.status, json: await res.json().catch(() => null) }
   }, [method, path, body, sessionAuthToken])
+}
+
+/**
+ * Тот же вызов, но с разбором «залипших» окон банка.
+ *
+ * Банк — это интерфейс с состоянием: незакрытая форма держит всю сессию.
+ * Если человек начал платёж и ушёл, на следующий переход банк отвечает не
+ * разделом, а вопросом «Сохранить изменения?» — и так до ответа. В этом
+ * состоянии не открывается НИЧЕГО: ни выписка, ни эквайринг, ни разделы,
+ * а приложение показывало «банк не открыл раздел» (проверено 11.08.2026).
+ *
+ * Отвечаем «Не сохранять»: это отказ от брошенного черновика, он ничего
+ * не создаёт в банке. «Сохранить» создало бы документ без решения человека —
+ * так делать нельзя.
+ */
+async function bankApi(p, method, path, body) {
+  let r = await bankApiRaw(p, method, path, body)
+  for (let i = 0; i < 2; i++) {
+    const cmds = r.json?.commands || []
+    const dlg = cmds.find(c => /yesnocancelDialog/.test(c.instanceName || ''))
+    if (!dlg || !dlg.instanceToken) break
+    const q = String(dlg.fields?.message?.value || '')
+    if (!/сохранить изменения/i.test(q)) break
+    console.log('[bank] висело окно «' + q + '» — отвечаю «Не сохранять»')
+    await bankApiRaw(p, 'PUT', `/api/v1/${dlg.instanceName}/doAction`, {
+      instanceToken: dlg.instanceToken, actionId: '_no',
+    })
+    r = await bankApiRaw(p, method, path, body)   // повторяем исходный запрос
+  }
+  return r
 }
 
 /**
