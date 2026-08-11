@@ -179,11 +179,33 @@ app.use((req, res, next) => {
 const responseCache = new Map()
 const CACHE_TTL_MS = 60 * 1000
 
-/** Отдать из кэша или посчитать и запомнить. Ошибки не кэшируем. */
+// Сколько ответ считается «ещё пригодным»: в этом окне он отдаётся сразу,
+// а обновление идёт фоном. Человек видит данные мгновенно вместо ожидания
+// в 5–7 секунд, и почти всегда они уже свежие — банк за минуту меняется редко.
+const STALE_TTL_MS = 10 * 60 * 1000
+
+/**
+ * Отдать из кэша или посчитать и запомнить. Ошибки не кэшируем.
+ *
+ * Три состояния:
+ *   свежий (< ttl)          — отдаём как есть;
+ *   пригодный (< STALE_TTL) — отдаём сразу И обновляем фоном;
+ *   протухший               — ждём банк.
+ */
 async function cached(key, ttlMs, producer) {
   const hit = responseCache.get(key)
   if (hit && Date.now() - hit.at < ttlMs) {
     console.log(`[cache] ${key}: отдано из кэша (${Math.round((Date.now() - hit.at) / 1000)} c назад)`)
+    return hit.value
+  }
+  // Данные чуть устарели, но они есть: отдаём немедленно, обновляем в фоне
+  if (hit && hit.value !== undefined && Date.now() - hit.at < STALE_TTL_MS && !hit.pending) {
+    const age = Math.round((Date.now() - hit.at) / 1000)
+    console.log(`[cache] ${key}: отдано сразу (${age} c назад), обновляю фоном`)
+    const bg = producer()
+      .then((value) => { responseCache.set(key, { value, at: Date.now() }); return value })
+      .catch((e) => { console.warn(`[cache] ${key}: фоновое обновление не удалось:`, e.message) })
+    responseCache.set(key, { value: hit.value, at: hit.at, pending: bg })
     return hit.value
   }
   // Если такой запрос уже выполняется — ждём его, а не запускаем второй
@@ -248,9 +270,50 @@ app.post('/api/login', async (req, res) => {
           console.log('[auth] банк отверг учётные данные — пароль стёрт')
         }
       })
-      .finally(() => { whoAmIWarming = false })
+      .finally(() => { whoAmIWarming = false; warmUp() })
   }
 })
+
+/**
+ * Прогрев после входа: пока человек смотрит на главную, фоном подтягиваем
+ * то, что он откроет следующим. Иначе каждый первый заход в раздел стоит
+ * 5–7 секунд ожидания банка, хотя запрос можно было сделать заранее.
+ *
+ * Всё через тот же кэш, поэтому лишних походов в банк не будет: экран
+ * возьмёт готовый ответ.
+ */
+function warmUp() {
+  const creds = dbo()
+  if (!creds) return
+  const jobs = [
+    ['счета', () => cached('accounts', CACHE_TTL_MS, async () => {
+      const data = await getAccountsData(creds.login, creds.password)
+      let own = []
+      try { own = await getAccountNames(creds.login, creds.password) } catch { /* не критично */ }
+      return { data, own }
+    })],
+    ['документы', () => cached('documents', CACHE_TTL_MS, () => getDocuments(creds.login, creds.password))],
+  ]
+  ;(async () => {
+    for (const [name, run] of jobs) {
+      try { await run(); console.log('[прогрев]', name, 'готовы') }
+      catch (e) { console.warn('[прогрев]', name, 'не вышло:', e.message) }
+    }
+  })()
+}
+
+// Сессия банка живёт 20 минут, пароль в памяти — 30. Если человек работает
+// с паузами, каждая пауза стоила нового входа: 40–90 секунд и риск попасть
+// под ограничение банка по частоте. Поэтому пока пароль в памяти, тихо
+// поддерживаем сессию живой.
+const KEEPALIVE_MS = 8 * 60 * 1000
+setInterval(() => {
+  const creds = dbo()
+  if (!creds) return
+  callBankApi(creds.login, creds.password, { method: 'GET', path: '/api/v1/menu' })
+    .then(() => console.log('[keepalive] сессия банка поддержана'))
+    .catch((e) => console.warn('[keepalive] не вышло:', e.message))
+}, KEEPALIVE_MS).unref?.()
 
 // Выход: стираем пароль из памяти немедленно, не дожидаясь таймаута.
 app.post('/api/session/end', (_, res) => {
