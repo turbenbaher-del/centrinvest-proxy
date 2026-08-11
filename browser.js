@@ -35,6 +35,12 @@ async function getBrowser() {
   return browser
 }
 
+// Вход идёт ОДИН на всех: приложение открывает экран и сразу шлёт пачку
+// запросов (счета, документы, письма, баннеры). Раньше каждый из них, застав
+// сессию просроченной, начинал собственный вход — банк видел серию попыток
+// и включал временное ограничение, а запросы висели по 30–40 секунд.
+let loginInFlight = null
+
 async function ensureLoggedIn(username, password) {
   const now = Date.now()
   if (page && now < sessionExpiry) {
@@ -43,9 +49,19 @@ async function ensureLoggedIn(username, password) {
       if (!url.includes('login.html')) return page
     } catch {}
   }
+  if (loginInFlight) return loginInFlight
+  loginInFlight = doLogin(username, password).finally(() => { loginInFlight = null })
+  return loginInFlight
+}
 
+async function doLogin(username, password) {
   console.log('[browser] Logging in...')
   const b = await getBrowser()
+  // Прошлую сессию закрываем: без этого контексты Chromium копились с каждым
+  // входом, память в контейнере кончалась, и браузер падал с «Target page,
+  // context or browser has been closed» — после чего висело всё подряд.
+  try { if (page) await page.context().close() } catch { /* уже закрыт */ }
+  page = null
   const ctx = await b.newContext({
     ignoreHTTPSErrors: true,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
