@@ -295,15 +295,15 @@ async function getAccountsViaResponseListener(p) {
 
   p.on('response', onResponse)
 
-  // Dismiss any "mustRead" modal that blocks navigation
+  // Окно обязательного письма только прячем. Нажимать в нём кнопку нельзя:
+  // это подтверждение ознакомления от имени клиента, а такое решение
+  // принимает человек — сервис лишь показывает письмо в приложении.
   const dismissed = await p.evaluate(() => {
     const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
     if (!modal) return false
-    const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
-    const closeBtn = btns.find(b => /закр|ок\b|ok\b|прочит|понят|close|подтв/i.test(b.textContent || '')) || btns[btns.length - 1]
-    if (closeBtn) { closeBtn.click(); return 'btn:' + (closeBtn.textContent || '').trim().substring(0, 30) }
-    modal.remove()
-    return 'removed'
+    modal.setAttribute('data-pva-hidden', '1')
+    modal.style.display = 'none'
+    return 'hidden'
   })
   if (dismissed) { console.log('[browser] Dismissed modal:', dismissed); await p.waitForTimeout(1000) }
   else { await p.keyboard.press('Escape'); await p.waitForTimeout(500) }
@@ -635,15 +635,13 @@ async function getPaymentsViaResponseListener(p) {
     let prevCount = 0
     for (let attempt = 0; attempt < 8; attempt++) {
       // Dismiss any modal that might have appeared
-      await p.evaluate(() => {
-        const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
-        if (modal) {
-          const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
-          const last = btns[btns.length - 1]
-          if (last) last.click()
-          else modal.remove()
-        }
-      })
+      await p.evaluate((() => {
+        // Окно обязательного письма НЕ подтверждаем: нажатие кнопки в нём
+        // означает «ознакомлен» от имени клиента. Просто убираем его с экрана,
+        // чтобы не мешало навигации; подтверждение делает человек в приложении.
+        const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (m) { m.setAttribute('data-pva-hidden', '1'); m.style.display = 'none' }
+      }))
       // Scroll to bottom to trigger infinite load
       await p.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
       await p.waitForTimeout(1500)
@@ -1469,14 +1467,13 @@ async function submitPayment(username, password, paymentData) {
   console.log('[browser] Submitting payment:', JSON.stringify(paymentData).substring(0, 200))
 
   // Dismiss modal if present
-  await p.evaluate(() => {
-    const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
-    if (modal) {
-      const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
-      const last = btns[btns.length - 1]
-      if (last) last.click(); else modal.remove()
-    }
-  })
+  await p.evaluate((() => {
+        // Окно обязательного письма НЕ подтверждаем: нажатие кнопки в нём
+        // означает «ознакомлен» от имени клиента. Просто убираем его с экрана,
+        // чтобы не мешало навигации; подтверждение делает человек в приложении.
+        const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (m) { m.setAttribute('data-pva-hidden', '1'); m.style.display = 'none' }
+      }))
   await p.waitForTimeout(500)
 
   // Click "Оплатить" (Pay) in the nav to open payment form
@@ -1892,7 +1889,9 @@ async function transferOwn(username, password, { fromAccount, toAccount, amount,
   const toAlias = (x) => OWN_ACCOUNTS[x] || x
   const fromAliasName = toAlias(fromAccount)
   const toAliasName = toAlias(toAccount)
-  const dismiss = async () => { try { await p.evaluate(() => { const m=document.querySelector('[data-at="modal-ui/messages/mustRead"]'); if(m){const bs=[...m.querySelectorAll('button,[role=button]')]; (bs[bs.length-1]||{click(){}}).click()} }) } catch {} }
+  // Окно обязательного письма прячем, а не подтверждаем: подтверждение
+  // ознакомления — действие клиента, а не сервиса.
+  const dismiss = async () => { try { await p.evaluate(() => { const m=document.querySelector('[data-at="modal-ui/messages/mustRead"]'); if(m){ m.setAttribute('data-pva-hidden','1'); m.style.display='none' } }) } catch {} }
 
   await p.waitForTimeout(500); await dismiss()
 
@@ -2001,13 +2000,13 @@ async function getTariffs(username, password) {
 
   const dismiss = async () => {
     try {
-      await p.evaluate(() => {
-        const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
-        if (modal) {
-          const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
-          const b = btns[btns.length - 1]; if (b) b.click(); else modal.remove()
-        }
-      })
+      await p.evaluate((() => {
+        // Окно обязательного письма НЕ подтверждаем: нажатие кнопки в нём
+        // означает «ознакомлен» от имени клиента. Просто убираем его с экрана,
+        // чтобы не мешало навигации; подтверждение делает человек в приложении.
+        const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (m) { m.setAttribute('data-pva-hidden', '1'); m.style.display = 'none' }
+      }))
     } catch {}
   }
 
@@ -2091,13 +2090,13 @@ async function getSectionData(username, password, key) {
 
   const dismiss = async () => {
     try {
-      await p.evaluate(() => {
-        const modal = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
-        if (modal) {
-          const btns = Array.from(modal.querySelectorAll('button, [role="button"]'))
-          const b = btns[btns.length - 1]; if (b) b.click(); else modal.remove()
-        }
-      })
+      await p.evaluate((() => {
+        // Окно обязательного письма НЕ подтверждаем: нажатие кнопки в нём
+        // означает «ознакомлен» от имени клиента. Просто убираем его с экрана,
+        // чтобы не мешало навигации; подтверждение делает человек в приложении.
+        const m = document.querySelector('[data-at="modal-ui/messages/mustRead"]')
+        if (m) { m.setAttribute('data-pva-hidden', '1'); m.style.display = 'none' }
+      }))
     } catch {}
   }
 

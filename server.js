@@ -42,6 +42,13 @@ const CREDS_TTL_MS = 30 * 60 * 1000
 
 let liveSession = null   // { login, password, lastUsedAt }
 
+// Почему пароля нет в памяти. Приложение показывало одинаковый текст про
+// «простой» и при неверном пароле, и после перезапуска сервиса — человек
+// вводил тот же неверный пароль снова, приближая блокировку учётной записи.
+// 'restart' — сервис только что поднялся и пароля не видел;
+// 'idle'    — стёрт по бездействию; 'badCredentials' — банк отверг пароль.
+let lastLogoutReason = 'restart'
+
 /** Учётные данные текущей сессии или null, если входа не было. */
 function dbo() {
   if (liveSession) {
@@ -50,6 +57,7 @@ function dbo() {
       return liveSession
     }
     liveSession = null
+    lastLogoutReason = 'idle'
     console.log('[auth] сессия истекла — пароль стёрт из памяти')
     audit('auth.expired', 'info', { reason: 'бездействие' })
   }
@@ -168,6 +176,7 @@ app.use((req, res, next) => {
     success: false,
     error: 'Требуется вход: пароль ДБО не хранится на сервере',
     needLogin: true,
+    reason: lastLogoutReason,
   })
 })
 
@@ -246,6 +255,7 @@ app.post('/api/login', async (req, res) => {
   // с переменными окружения больше не с чем — и не нужно: правильность
   // проверит сам банк при входе.
   liveSession = { login, password, lastUsedAt: Date.now() }
+  lastLogoutReason = 'restart'
   audit('auth.login', 'info', { login, ip: req.ip })
 
   // Отвечаем СРАЗУ: полный заход в банк занимает 40-90 c, и сервис-воркер
@@ -267,6 +277,7 @@ app.post('/api/login', async (req, res) => {
         // Такие ошибки о правильности пароля не говорят ничего.
         if (isWrongCredentials(err.message) && liveSession?.password === password) {
           liveSession = null
+          lastLogoutReason = 'badCredentials'
           console.log('[auth] банк отверг учётные данные — пароль стёрт')
         }
       })
