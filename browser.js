@@ -3196,8 +3196,11 @@ async function payContragent(username, password, {
   await setField('payerAccountId', payer.id)
   // Номер и дата: в форме банка они есть и редактируются. Пустые не трогаем —
   // тогда номер присвоит банк, как и в веб-версии.
-  if (docNumber) await setField('docNumber', String(docNumber))
-  if (docDate) await setField('docDate', bankDate(docDate))
+  // ВРЕМЕННО: номер, дата и очерёдность не отправляются. Банк отвечал на
+  // сохранение отказом формы (500), и пока не доказано, какое именно поле он
+  // не принимает, безопаснее оставить его умолчания. Приложение может слать
+  // эти значения (старая копия в кэше телефона) — сервис их игнорирует.
+  if (docNumber || docDate) console.log('[contragent] номер и дату не отправляю: банк отвечал отказом')
   // Сначала БИК: по нему банк подставит наименование банка и корсчёт
   await setField('receiverBankBic', norm(receiverBic))
   if (receiverInn) await setField('receiverINN', norm(receiverInn))
@@ -3214,7 +3217,7 @@ async function payContragent(username, password, {
   const trySet = async (name, value) => {
     try { await setField(name, value) } catch (e) { console.warn('[поле]', name, 'не принято:', e.message) }
   }
-  if (priority) await trySet('paymentPriority', String(priority))
+  if (priority) console.log('[contragent] очерёдность не отправляю:', priority)
   if (urgent) await trySet('paymentCodeCheck', true)
   if (reserveField) await trySet('reserv23', String(reserveField))
   if (saveAsTemplate) {
@@ -3427,7 +3430,7 @@ async function payBudget(username, password, {
   const trySet = async (name, value) => {
     try { await setField(name, value) } catch (e) { console.warn('[поле]', name, 'не принято:', e.message) }
   }
-  if (priority) await trySet('paymentPriority', String(priority))
+  if (priority) console.log('[contragent] очерёдность не отправляю:', priority)
   if (urgent) await trySet('paymentCodeCheck', true)
   if (reserveField) await trySet('reserv23', String(reserveField))
   if (saveAsTemplate) {
