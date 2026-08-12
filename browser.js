@@ -3209,12 +3209,17 @@ async function payContragent(username, password, {
   // Поля, которые есть в форме банка и раньше терялись: очерёдность (банк по
   // умолчанию ставит 5), срочный платёж, УИН, резервное поле и сохранение
   // платежа в шаблоны. Пустые не трогаем, чтобы не переписывать умолчания банка.
-  if (priority) await setField('paymentPriority', String(priority))
-  if (urgent) await setField('paymentCodeCheck', true)
-  if (reserveField) await setField('reserv23', String(reserveField))
+  // Необязательные поля ставим осторожно: банк отвечает на неудачное значение
+  // отказом всей формы (500 errorCode), и человек теряет платёж из-за галочки.
+  const trySet = async (name, value) => {
+    try { await setField(name, value) } catch (e) { console.warn('[поле]', name, 'не принято:', e.message) }
+  }
+  if (priority) await trySet('paymentPriority', String(priority))
+  if (urgent) await trySet('paymentCodeCheck', true)
+  if (reserveField) await trySet('reserv23', String(reserveField))
   if (saveAsTemplate) {
-    await setField('addToTemplates', true)
-    if (templateName) await setField('templateName', String(templateName))
+    await trySet('addToTemplates', true)
+    if (templateName) await trySet('templateName', String(templateName))
   }
 
   const fields = {
@@ -3417,12 +3422,17 @@ async function payBudget(username, password, {
   // Поля, которые есть в форме банка и раньше терялись: очерёдность (банк по
   // умолчанию ставит 5), срочный платёж, УИН, резервное поле и сохранение
   // платежа в шаблоны. Пустые не трогаем, чтобы не переписывать умолчания банка.
-  if (priority) await setField('paymentPriority', String(priority))
-  if (urgent) await setField('paymentCodeCheck', true)
-  if (reserveField) await setField('reserv23', String(reserveField))
+  // Необязательные поля ставим осторожно: банк отвечает на неудачное значение
+  // отказом всей формы (500 errorCode), и человек теряет платёж из-за галочки.
+  const trySet = async (name, value) => {
+    try { await setField(name, value) } catch (e) { console.warn('[поле]', name, 'не принято:', e.message) }
+  }
+  if (priority) await trySet('paymentPriority', String(priority))
+  if (urgent) await trySet('paymentCodeCheck', true)
+  if (reserveField) await trySet('reserv23', String(reserveField))
   if (saveAsTemplate) {
-    await setField('addToTemplates', true)
-    if (templateName) await setField('templateName', String(templateName))
+    await trySet('addToTemplates', true)
+    if (templateName) await trySet('templateName', String(templateName))
   }
 
   const fields = {
