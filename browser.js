@@ -3261,7 +3261,16 @@ async function payContragent(username, password, {
       .flatMap(([id, f]) => (f.errors || []).map(e => id + ': ' + (e.message || e)))
     if (hard.length) return { ok: false, error: hard.join('; ') }
 
-    const es = cmds.find(c => /errorsSave/.test(c.instanceName || ''))
+    // Банк подтвердил операцию — дальше искать нечего. Проверяем это ПЕРВЫМ:
+    // иначе команда о закрытии окна проверки принималась за новое окно, и
+    // сервис долбился в уже закрытый диалог, а созданный платёж считал неудачей.
+    const done = cmds.some(c => c.command === 'showOperationResult'
+      || (c.command !== 'formClose' && /confirmDialog/.test(c.instanceName || '')))
+    if (done) {
+      return { ok: true, saved: true, id: await findCreatedDoc(p, { amount, purpose }) }
+    }
+
+    const es = cmds.find(c => c.command !== 'formClose' && /errorsSave/.test(c.instanceName || '') && c.instanceToken)
     if (es?.instanceToken) {
       const said = collectMessages(es)
       if (said) { lastComplaint = said; console.log('[contragent] банк предупреждает:', said.slice(0, 200)) }
@@ -3483,7 +3492,16 @@ async function payBudget(username, password, {
       .flatMap(([id, f]) => (f.errors || []).map(e => id + ': ' + (e.message || e)))
     if (hard.length) return { ok: false, error: hard.join('; ') }
 
-    const es = cmds.find(c => /errorsSave/.test(c.instanceName || ''))
+    // Банк подтвердил операцию — дальше искать нечего. Проверяем это ПЕРВЫМ:
+    // иначе команда о закрытии окна проверки принималась за новое окно, и
+    // сервис долбился в уже закрытый диалог, а созданный платёж считал неудачей.
+    const done = cmds.some(c => c.command === 'showOperationResult'
+      || (c.command !== 'formClose' && /confirmDialog/.test(c.instanceName || '')))
+    if (done) {
+      return { ok: true, saved: true, id: await findCreatedDoc(p, { amount, purpose }) }
+    }
+
+    const es = cmds.find(c => c.command !== 'formClose' && /errorsSave/.test(c.instanceName || '') && c.instanceToken)
     if (es?.instanceToken) {
       const said = collectMessages(es)
       if (said) { lastComplaint = said; console.log('[budget] банк предупреждает:', said.slice(0, 200)) }
@@ -3586,7 +3604,16 @@ async function transferOwnStructured(username, password, { fromAccount, toAccoun
     // Диалог предупреждений (WARN) — продолжаем нашим действием.
     // Текст запоминаем: если дальше упрёмся, человеку нужно знать причину,
     // а не «неожиданный ответ банка».
-    const es = cmds.find(c => /errorsSave/.test(c.instanceName || ''))
+    // Банк подтвердил операцию — дальше искать нечего. Проверяем это ПЕРВЫМ:
+    // иначе команда о закрытии окна проверки принималась за новое окно, и
+    // сервис долбился в уже закрытый диалог, а созданный платёж считал неудачей.
+    const done = cmds.some(c => c.command === 'showOperationResult'
+      || (c.command !== 'formClose' && /confirmDialog/.test(c.instanceName || '')))
+    if (done) {
+      return { ok: true, saved: true, id: await findCreatedDoc(p, { amount, purpose }) }
+    }
+
+    const es = cmds.find(c => c.command !== 'formClose' && /errorsSave/.test(c.instanceName || '') && c.instanceToken)
     if (es?.instanceToken) {
       const said = collectMessages(es)
       if (said) { lastComplaint = said; console.log('[transfer2] банк предупреждает:', said.slice(0, 200)) }
