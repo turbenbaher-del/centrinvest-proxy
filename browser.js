@@ -3233,6 +3233,11 @@ async function payContragent(username, password, {
   })
   console.log('[contragent] после _save →',
     (resp.json?.commands || []).map(c => c.instanceName).join(', '))
+  // Пустой ответ банка ничего не объясняет — печатаем, что он реально прислал.
+  if (!(resp.json?.commands || []).length) {
+    console.log('[contragent] пустой ответ: статус', resp.status,
+      '| тело:', JSON.stringify(resp.json).slice(0, 500))
+  }
 
   // Разбор ответа — тот же, что у перевода между своими счетами
   let lastComplaint = ''
