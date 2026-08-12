@@ -3143,7 +3143,7 @@ function fieldVal(f) {
 async function payContragent(username, password, {
   fromAccount, amount, purpose = '',
   receiverName, receiverInn, receiverKpp = '', receiverAccount, receiverBic,
-  vatRule,
+  vatRule, docNumber = '', docDate = '',
 }) {
   const p = await ensureLoggedIn(username, password)
   if (!await waitForAppReady(p, 45000)) throw new Error('Интерфейс ДБО не загрузился')
@@ -3191,6 +3191,10 @@ async function payContragent(username, password, {
   }
 
   await setField('payerAccountId', payer.id)
+  // Номер и дата: в форме банка они есть и редактируются. Пустые не трогаем —
+  // тогда номер присвоит банк, как и в веб-версии.
+  if (docNumber) await setField('docNumber', String(docNumber))
+  if (docDate) await setField('docDate', bankDate(docDate))
   // Сначала БИК: по нему банк подставит наименование банка и корсчёт
   await setField('receiverBankBic', norm(receiverBic))
   if (receiverInn) await setField('receiverINN', norm(receiverInn))
@@ -3206,7 +3210,7 @@ async function payContragent(username, password, {
   // форме эти поля есть и редактируются. Пустые не отправляем: банк тогда
   // оставит свою нумерацию.
   if (docNumber) fields.docNumber = { value: String(docNumber) }
-  if (docDate) fields.docDate = { value: String(docDate) }
+  if (docDate) fields.docDate = { value: bankDate(docDate) }
   if (vatRule) fields.vatCalculationRule = { value: vatRule }
 
   let resp = await bankApi(p, 'PUT', `${FORM_PATH}/doAction`, {
@@ -3269,6 +3273,7 @@ async function payBudget(username, password, {
   fromAccount, amount, purpose = '',
   receiverName, receiverInn, receiverKpp = '', receiverAccount, receiverBic,
   drawerStatus, cbc, oktmo, payReason, taxPeriod, taxDocNumber, uin,
+  docNumber = '', docDate = '',
 }) {
   const p = await ensureLoggedIn(username, password)
   if (!await waitForAppReady(p, 45000)) throw new Error('Интерфейс ДБО не загрузился')
@@ -3312,6 +3317,10 @@ async function payBudget(username, password, {
   }
 
   await setField('payerAccountId', payer.id)
+  // Номер и дата: в форме банка они есть и редактируются. Пустые не трогаем —
+  // тогда номер присвоит банк, как и в веб-версии.
+  if (docNumber) await setField('docNumber', String(docNumber))
+  if (docDate) await setField('docDate', bankDate(docDate))
   await setField('receiverBankBic', norm(receiverBic))
   await setField('receiverINN', norm(receiverInn))
   await setField('receiverAccount', norm(receiverAccount))
@@ -3369,6 +3378,13 @@ async function payBudget(username, password, {
     ok: false,
     error: said || 'Банк не подтвердил сохранение. Проверьте КБК, ОКТМО и статус плательщика',
   }
+}
+
+/** Дата документа: приложение шлёт ISO (2026-08-12), банк ждёт 12.08.2026. */
+function bankDate(v) {
+  const s = String(v || '').trim()
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s)
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : s
 }
 
 async function transferOwnStructured(username, password, { fromAccount, toAccount, amount, purpose = '', sign = false, docNumber = '', docDate = '' }) {
