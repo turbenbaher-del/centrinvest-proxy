@@ -3144,6 +3144,8 @@ async function payContragent(username, password, {
   fromAccount, amount, purpose = '',
   receiverName, receiverInn, receiverKpp = '', receiverAccount, receiverBic,
   vatRule, docNumber = '', docDate = '',
+  priority = '', urgent = false, uin = '', reserveField = '',
+  saveAsTemplate = false, templateName = '',
 }) {
   const p = await ensureLoggedIn(username, password)
   if (!await waitForAppReady(p, 45000)) throw new Error('Интерфейс ДБО не загрузился')
@@ -3201,6 +3203,18 @@ async function payContragent(username, password, {
   await setField('receiverAccount', norm(receiverAccount))
   await setField('receiverName', receiverName)
   if (receiverKpp) await setField('receiverKPP', norm(receiverKpp))
+  if (uin) await setField('uip', String(uin))
+
+  // Поля, которые есть в форме банка и раньше терялись: очерёдность (банк по
+  // умолчанию ставит 5), срочный платёж, УИН, резервное поле и сохранение
+  // платежа в шаблоны. Пустые не трогаем, чтобы не переписывать умолчания банка.
+  if (priority) await setField('paymentPriority', String(priority))
+  if (urgent) await setField('paymentCodeCheck', true)
+  if (reserveField) await setField('reserv23', String(reserveField))
+  if (saveAsTemplate) {
+    await setField('addToTemplates', true)
+    if (templateName) await setField('templateName', String(templateName))
+  }
 
   const fields = {
     documentSum: { value: Number(amount).toFixed(2) },
@@ -3274,6 +3288,9 @@ async function payBudget(username, password, {
   receiverName, receiverInn, receiverKpp = '', receiverAccount, receiverBic,
   drawerStatus, cbc, oktmo, payReason, taxPeriod, taxDocNumber, uin,
   docNumber = '', docDate = '',
+  priority = '', urgent = false, reserveField = '',
+  customsCode = '', reasonDocDate = '',
+  saveAsTemplate = false, templateName = '',
 }) {
   const p = await ensureLoggedIn(username, password)
   if (!await waitForAppReady(p, 45000)) throw new Error('Интерфейс ДБО не загрузился')
@@ -3334,6 +3351,28 @@ async function payBudget(username, password, {
   await setField('payReason', payReason)
   await setField('taxDocNumber', taxDocNumber)
   await setField('uip', uin)
+  // Код таможенного органа вместо налогового периода — отдельное поле банка
+  if (customsCode) await setField('customCode', String(customsCode))
+  // Дата документа-основания у банка разбита на три поля
+  if (reasonDocDate) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(reasonDocDate))
+    if (m) {
+      await setField('docDateDay', m[3])
+      await setField('docDateMonth', m[2])
+      await setField('docDateYear', m[1])
+    }
+  }
+
+  // Поля, которые есть в форме банка и раньше терялись: очерёдность (банк по
+  // умолчанию ставит 5), срочный платёж, УИН, резервное поле и сохранение
+  // платежа в шаблоны. Пустые не трогаем, чтобы не переписывать умолчания банка.
+  if (priority) await setField('paymentPriority', String(priority))
+  if (urgent) await setField('paymentCodeCheck', true)
+  if (reserveField) await setField('reserv23', String(reserveField))
+  if (saveAsTemplate) {
+    await setField('addToTemplates', true)
+    if (templateName) await setField('templateName', String(templateName))
+  }
 
   const fields = {
     documentSum: { value: Number(amount).toFixed(2) },
