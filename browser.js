@@ -3168,8 +3168,9 @@ async function payContragent(username, password, {
 
   const r = await bankApi(p, 'POST', '/api/v1/menu/click',
     { menuItem: 'corporate-api-menu-small-r030contragent' })
-  const form = (r.json?.commands || []).find(c => /r030contragent/.test(c.instanceName || ''))
+  let form = (r.json?.commands || []).find(c => /r030contragent/.test(c.instanceName || '') && c.instanceToken)
   if (!form?.instanceToken) throw new Error('форма платежа контрагенту не открылась')
+  form = await reopenIfStale(p, 'corporate-api-menu-small-r030contragent', /r030contragent/, form)
 
   const token = form.instanceToken
   const FORM_PATH = '/api/v1/ui/rur/payment/r030contragent'
@@ -3291,6 +3292,25 @@ function pickConfirmAction(cmd) {
     .map(([id]) => id)
   const prefer = ['_save', '_ok', '_yes', '_continue', 'save', 'ok', 'yes', 'continue']
   return prefer.find(id => acts.includes(id)) || acts[0] || '_save'
+}
+
+
+/**
+ * Открыть форму платежа заново, если банк отдал её «пустой».
+ *
+ * После неудачной попытки форма остаётся открытой на стороне банка, и на
+ * следующий menu/click он присылает оболочку без счетов и без панели шаблонов.
+ * Дальше всё разваливается: счёт списания «не найден», а сохранение возвращает
+ * пустой ответ. Лечится закрытием формы (_close) и повторным открытием.
+ */
+async function reopenIfStale(p, menuItem, instanceRe, form) {
+  if ((form?.fields?.payerAccountId?.items || []).length) return form
+  if (!form?.instanceToken) return form
+  console.log('[форма] банк отдал пустую форму — закрываю и открываю заново')
+  await bankApi(p, 'PUT', `/api/v1/${form.instanceName}/doAction`,
+    { actionId: '_close', instanceToken: form.instanceToken }).catch(() => null)
+  const again = await bankApi(p, 'POST', '/api/v1/menu/click', { menuItem })
+  return (again.json?.commands || []).find(c => instanceRe.test(c.instanceName || '') && c.instanceToken) || form
 }
 
 /**
