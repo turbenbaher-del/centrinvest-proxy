@@ -3263,7 +3263,7 @@ async function payContragent(username, password, {
       const chosen = pickConfirmAction(es)
       console.log('[contragent] окно проверки: кнопки', JSON.stringify(Object.keys(es.actions || {})),
         '| нажимаю', chosen)
-      resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
+      resp = await bankApi(p, 'PUT', `/api/v1/${es.instanceName}/doAction`,
         { actionId: chosen, fields: {}, instanceToken: es.instanceToken })
       console.log('[contragent] после подтверждения →',
         (resp.json?.commands || []).map(c => `${c.command}:${c.instanceName}`).join(', ') || 'пусто, статус ' + resp.status)
@@ -3485,7 +3485,7 @@ async function payBudget(username, password, {
       const chosen = pickConfirmAction(es)
       console.log('[contragent] окно проверки: кнопки', JSON.stringify(Object.keys(es.actions || {})),
         '| нажимаю', chosen)
-      resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
+      resp = await bankApi(p, 'PUT', `/api/v1/${es.instanceName}/doAction`,
         { actionId: chosen, fields: {}, instanceToken: es.instanceToken })
       console.log('[contragent] после подтверждения →',
         (resp.json?.commands || []).map(c => `${c.command}:${c.instanceName}`).join(', ') || 'пусто, статус ' + resp.status)
@@ -3585,7 +3585,7 @@ async function transferOwnStructured(username, password, { fromAccount, toAccoun
     if (es?.instanceToken) {
       const said = collectMessages(es)
       if (said) { lastComplaint = said; console.log('[transfer2] банк предупреждает:', said.slice(0, 200)) }
-      resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
+      resp = await bankApi(p, 'PUT', `/api/v1/${es.instanceName}/doAction`,
         { actionId: pickConfirmAction(es) === '_save' ? action : pickConfirmAction(es), fields: {}, instanceToken: es.instanceToken })
       continue
     }
