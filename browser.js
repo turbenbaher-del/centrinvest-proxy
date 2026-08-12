@@ -3206,7 +3206,12 @@ async function payContragent(username, password, {
   if (receiverInn) await setField('receiverINN', norm(receiverInn))
   await setField('receiverAccount', norm(receiverAccount))
   await setField('receiverName', receiverName)
-  if (receiverKpp) await setField('receiverKPP', norm(receiverKpp))
+  // КПП — только для юрлиц. У ИП и физлиц банк требует пустое поле:
+  // «для юр.лиц должен быть 9-значным кодом, для ИП - поле не заполняется».
+  // ИНН из 12 цифр — это ИП или физлицо, КПП там быть не может.
+  const innIsPerson = norm(receiverInn).length === 12
+  if (receiverKpp && !innIsPerson) await setField('receiverKPP', norm(receiverKpp))
+  else if (receiverKpp) console.log('[contragent] КПП не отправляю: у ИП оно не заполняется')
   if (uin) await setField('uip', String(uin))
 
   // Поля, которые есть в форме банка и раньше терялись: очерёдность (банк по
