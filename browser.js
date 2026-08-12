@@ -3307,9 +3307,24 @@ async function payContragent(username, password, {
 function pickConfirmAction(cmd) {
   const acts = Object.entries(cmd?.actions || {})
     .filter(([, a]) => a && a.visible !== false)
-    .map(([id]) => id)
-  const prefer = ['_save', '_ok', '_yes', '_continue', 'save', 'ok', 'yes', 'continue']
-  return prefer.find(id => acts.includes(id)) || acts[0] || '_save'
+    .map(([id, a]) => ({ id, label: String(a.label || '') }))
+
+  // Выбираем по ПОДПИСИ, а не по идентификатору: у окна «Результаты проверки»
+  // две кнопки — «Вернуться к редактированию» и «Продолжить». Идентификаторы
+  // у них непредсказуемые, и выбор «первой попавшейся» возвращал в форму,
+  // а платёж не сохранялся.
+  const back = /верн|отмен|редактир|закр|нет/i
+  const go = /продолж|сохран|подтверд|^да$|^ок$/i
+
+  const byLabel = acts.find(a => go.test(a.label) && !back.test(a.label))
+  if (byLabel) return byLabel.id
+
+  const byId = ['_save', '_ok', '_yes', '_continue'].find(id => acts.some(a => a.id === id))
+  if (byId) return byId
+
+  // Ничего похожего на «продолжить» — берём любую, кроме возврата к правке.
+  const safe = acts.find(a => !back.test(a.label))
+  return (safe || acts[0] || { id: '_save' }).id
 }
 
 
