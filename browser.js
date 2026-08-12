@@ -3247,7 +3247,7 @@ async function payContragent(username, password, {
       const said = collectMessages(es)
       if (said) { lastComplaint = said; console.log('[contragent] банк предупреждает:', said.slice(0, 200)) }
       resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
-        { actionId: '_save', fields: {}, instanceToken: es.instanceToken })
+        { actionId: pickConfirmAction(es), fields: {}, instanceToken: es.instanceToken })
       continue
     }
 
@@ -3259,12 +3259,38 @@ async function payContragent(username, password, {
     break
   }
 
+  // Прежде чем сказать «не сохранилось», спрашиваем банк, есть ли документ:
+  // предупреждение могло быть информационным, а платёж — уже созданным.
+  // Ложное «не вышло» опаснее всего: человек повторяет платёж и создаёт дубль.
+  const created = await findCreatedDoc(p, { amount, purpose }).catch(() => null)
+  if (created) {
+    console.log('[contragent] банк ворчал, но документ создан:', created)
+    return { ok: true, saved: true, id: created, warning: lastComplaint || undefined }
+  }
+
   const said = lastComplaint
     || (resp.json?.commands || []).map(collectMessages).filter(Boolean).join('; ')
   return {
     ok: false,
     error: said || 'Банк не подтвердил сохранение платежа. Проверьте реквизиты получателя и назначение',
   }
+}
+
+
+/**
+ * Какое действие нажать в предупреждении банка.
+ *
+ * Банк отвечает на сохранение окном «Результаты проверки» — это ПРЕДУПРЕЖДЕНИЕ
+ * (проверка контрагента), а не отказ. Раньше мы всегда слали `_save`, и если у
+ * окна такой кнопки не было, документ повисал: сервис отвечал «Результаты
+ * проверки», хотя банк ждал обычного «Продолжить».
+ */
+function pickConfirmAction(cmd) {
+  const acts = Object.entries(cmd?.actions || {})
+    .filter(([, a]) => a && a.visible !== false)
+    .map(([id]) => id)
+  const prefer = ['_save', '_ok', '_yes', '_continue', 'save', 'ok', 'yes', 'continue']
+  return prefer.find(id => acts.includes(id)) || acts[0] || '_save'
 }
 
 /**
@@ -3399,7 +3425,7 @@ async function payBudget(username, password, {
       const said = collectMessages(es)
       if (said) { lastComplaint = said; console.log('[budget] банк предупреждает:', said.slice(0, 200)) }
       resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
-        { actionId: '_save', fields: {}, instanceToken: es.instanceToken })
+        { actionId: pickConfirmAction(es), fields: {}, instanceToken: es.instanceToken })
       continue
     }
 
@@ -3497,7 +3523,7 @@ async function transferOwnStructured(username, password, { fromAccount, toAccoun
       const said = collectMessages(es)
       if (said) { lastComplaint = said; console.log('[transfer2] банк предупреждает:', said.slice(0, 200)) }
       resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
-        { actionId: action, fields: {}, instanceToken: es.instanceToken })
+        { actionId: pickConfirmAction(es) === '_save' ? action : pickConfirmAction(es), fields: {}, instanceToken: es.instanceToken })
       continue
     }
 
