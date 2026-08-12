@@ -3260,8 +3260,13 @@ async function payContragent(username, password, {
     if (es?.instanceToken) {
       const said = collectMessages(es)
       if (said) { lastComplaint = said; console.log('[contragent] банк предупреждает:', said.slice(0, 200)) }
+      const chosen = pickConfirmAction(es)
+      console.log('[contragent] окно проверки: кнопки', JSON.stringify(Object.keys(es.actions || {})),
+        '| нажимаю', chosen)
       resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
-        { actionId: pickConfirmAction(es), fields: {}, instanceToken: es.instanceToken })
+        { actionId: chosen, fields: {}, instanceToken: es.instanceToken })
+      console.log('[contragent] после подтверждения →',
+        (resp.json?.commands || []).map(c => `${c.command}:${c.instanceName}`).join(', ') || 'пусто, статус ' + resp.status)
       continue
     }
 
@@ -3462,8 +3467,13 @@ async function payBudget(username, password, {
     if (es?.instanceToken) {
       const said = collectMessages(es)
       if (said) { lastComplaint = said; console.log('[budget] банк предупреждает:', said.slice(0, 200)) }
+      const chosen = pickConfirmAction(es)
+      console.log('[contragent] окно проверки: кнопки', JSON.stringify(Object.keys(es.actions || {})),
+        '| нажимаю', chosen)
       resp = await bankApi(p, 'PUT', '/api/v1/ui/messages/errorsSave/doAction',
-        { actionId: pickConfirmAction(es), fields: {}, instanceToken: es.instanceToken })
+        { actionId: chosen, fields: {}, instanceToken: es.instanceToken })
+      console.log('[contragent] после подтверждения →',
+        (resp.json?.commands || []).map(c => `${c.command}:${c.instanceName}`).join(', ') || 'пусто, статус ' + resp.status)
       continue
     }
 
