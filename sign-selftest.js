@@ -22,6 +22,7 @@ let smsTries = 0
 let sent = false
 let noSign = false
 let pages = 0
+let marked = false
 
 async function fakeBankApi(p, method, url, body) {
   calls.push({ method, url, body })
@@ -37,12 +38,23 @@ async function fakeBankApi(p, method, url, body) {
     return wrap([
       cmd('ui/mixedDoc', 'T-root'),
       cmd('ui/mixedDoc/out/partlySigned', 'T-tab', {
-        actions: { _sign: { label: 'Подписать' }, _send: { label: 'Отправить' }, loadMore: { label: 'Показать ещё' } },
+        actions: { _sign: { label: 'Подписать', disabled: true }, _send: { label: 'Отправить', disabled: true }, loadMore: { label: 'Показать ещё' } },
         fields: { mixedDocs: { items: rows } },
       }),
     ])
   }
 
+  if (k === 'PUT /api/v1/ui/mixedDoc/out/partlySigned/stateUpdate') {
+    if (body.submitField !== 'mixedDocs') throw new Error('строка отмечается не тем полем: ' + body.submitField)
+    if (JSON.stringify(body.fields?.mixedDocs?.value) !== JSON.stringify(['DOC-1'])) {
+      throw new Error('отмечена не та строка: ' + JSON.stringify(body.fields))
+    }
+    marked = true
+    return wrap([cmd('ui/mixedDoc/out/partlySigned', 'T-tab-sel', {
+      actions: { _sign: { label: 'Подписать' }, loadMore: { label: 'Показать ещё' } },
+      fields: { mixedDocs: { items: [{ id: 'DOC-1' }] } },
+    })])
+  }
   if (k === 'PUT /api/v1/ui/mixedDoc/out/partlySigned/doAction' && body.actionId === 'loadMore') {
     pages += 1
     return wrap([cmd('ui/mixedDoc/out/partlySigned', 'T-tab-' + pages, {
@@ -54,6 +66,7 @@ async function fakeBankApi(p, method, url, body) {
   }
   if (k === 'PUT /api/v1/ui/mixedDoc/out/partlySigned/doAction') {
     if (body.actionId !== '_sign') throw new Error('нажато не то действие: ' + body.actionId)
+    if (!marked) throw new Error('подпись нажата, пока строка не отмечена — банк держит кнопку выключенной')
     if (JSON.stringify(body.fields?.mixedDocs?.value) !== JSON.stringify(['DOC-1'])) {
       throw new Error('строка грида отмечена неверно: ' + JSON.stringify(body.fields))
     }
@@ -234,7 +247,7 @@ const check = (cond, what) => { console.log((cond ? '  ✓ ' : '  ✗ ') + what)
   check(!calls.some(c => /continueSign|prepareSign/.test(c.url)), 'continueSign НЕ вызывался ни разу')
 
   console.log('\n=== СЦЕНАРИЙ 2: попытки исчерпаны → синхронизация токена ===')
-  scenario = 'sync'; smsTries = 0; sent = false
+  scenario = 'sync'; smsTries = 0; sent = false; marked = false
   const s2 = await sign.signStart(...creds, { id: 'DOC-1' })
   check(s2.stage === 'needKey', 'снова просят ключ')
   const sync = await sign.signSubmitKey(...creds, { id: 'DOC-1', key: '222222' })
@@ -245,7 +258,7 @@ const check = (cond, what) => { console.log((cond ? '  ✓ ' : '  ✗ ') + what)
   check(after.stage === 'done', 'после синхронизации документ ушёл в банк')
 
   console.log('\n=== СЦЕНАРИЙ 4: PayControl — ожидание на телефоне и ручной код ===')
-  scenario = 'pc'; smsTries = 0; sent = false
+  scenario = 'pc'; smsTries = 0; sent = false; marked = false
   const pcStart = await sign.signStart(...creds, { id: 'DOC-1', mainProfileId: 'CP-PC' })
   show('signStart (PayControl)', pcStart)
   check(pcStart.stage === 'confirm' && pcStart.confirmType === 'payControl', 'банк ждёт подтверждения на телефоне')
@@ -269,7 +282,7 @@ const check = (cond, what) => { console.log((cond ? '  ✓ ' : '  ✗ ') + what)
   noSign = false
 
   console.log('\n=== СЦЕНАРИЙ 6: документ глубже первой страницы вкладки ===')
-  scenario = 'paged'; pages = 0; smsTries = 0; sent = false
+  scenario = 'paged'; pages = 0; smsTries = 0; sent = false; marked = false
   const paged = await sign.signStart(...creds, { id: 'DOC-1' })
   show('signStart (вторая страница)', paged)
   check(paged.stage === 'needKey', 'документ найден после «Показать ещё»')

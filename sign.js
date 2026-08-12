@@ -160,12 +160,19 @@ async function setField(p, form, name, value) {
   })
 }
 
-/** Действие формы по идентификатору или по подписи кнопки. */
-function actionOf(form, ids = [], labelRe = null) {
+/**
+ * Действие формы по идентификатору или по подписи кнопки.
+ *
+ * `allowDisabled` нужен для массовых действий списка: банк держит «Подписать»
+ * выключенной, пока в гриде не отмечена строка, и до выделения такую кнопку
+ * приходится считать существующей.
+ */
+function actionOf(form, ids = [], labelRe = null, { allowDisabled = false } = {}) {
   const acts = form?.actions || {}
-  for (const id of ids) if (acts[id] && acts[id].disabled !== true) return id
+  const usable = a => a && (allowDisabled || a.disabled !== true)
+  for (const id of ids) if (usable(acts[id])) return id
   if (labelRe) {
-    const hit = Object.entries(acts).find(([, a]) => a && a.disabled !== true && labelRe.test(String(a.label || '')))
+    const hit = Object.entries(acts).find(([, a]) => usable(a) && labelRe.test(String(a.label || '')))
     if (hit) return hit[0]
   }
   return null
@@ -286,10 +293,27 @@ async function openSignAction(p, id) {
     if (row.actions && row.actions.sign === false) {
       throw new Error('банк не даёт подписать этот документ (подпись недоступна)')
     }
-    const actionId = actionOf(form, ['_sign'], /^подпис/i)
-    if (!actionId) throw new Error(`во вкладке «${tab.key}» нет действия подписи`)
 
-    console.log('[sign] документ найден во вкладке', tab.key, '| нажимаю', actionId)
+    // Сначала ОТМЕТИТЬ строку, потом нажимать. Значение поля-грида и есть
+    // список отмеченных строк (веб-версия чистит выделение, присваивая ему
+    // null). Пока ничего не отмечено, банк держит «Подписать» выключенной —
+    // на этом и споткнулся первый живой прогон: действие в форме было, но
+    // с `disabled`, и сервис отвечал «нет действия подписи».
+    const marked = await bankApi(p, 'PUT', `/api/v1/${form.instanceName}/stateUpdate`, {
+      instanceToken: form.instanceToken,
+      rowId: String(id),
+      submitField: MIXED_GRID,
+      fields: { [MIXED_GRID]: { value: [String(id)] } },
+    })
+    form = lastForm(marked.json?.commands || [], new RegExp(`${tab.form}$`)) || form
+
+    const actionId = actionOf(form, ['_sign', 'sign'], /^подпис/i, { allowDisabled: true })
+    if (!actionId) {
+      const have = Object.keys(form.actions || {}).join(', ') || 'ничего'
+      throw new Error(`во вкладке «${tab.key}» банк не дал действия подписи (есть: ${have})`)
+    }
+
+    console.log('[sign] документ найден во вкладке', tab.key, '| строка отмечена | нажимаю', actionId)
     const res = await doAction(p, form, actionId, {
       fields: { [MIXED_GRID]: { value: [String(id)] } },
       rowId: String(id),
