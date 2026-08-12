@@ -3202,6 +3202,11 @@ async function payContragent(username, password, {
     documentSum: { value: Number(amount).toFixed(2) },
     paymentPurpose: { value: purpose },
   }
+  // Номер и дату банк проставляет сам, но человек вправе их задать — в его
+  // форме эти поля есть и редактируются. Пустые не отправляем: банк тогда
+  // оставит свою нумерацию.
+  if (docNumber) fields.docNumber = { value: String(docNumber) }
+  if (docDate) fields.docDate = { value: String(docDate) }
   if (vatRule) fields.vatCalculationRule = { value: vatRule }
 
   let resp = await bankApi(p, 'PUT', `${FORM_PATH}/doAction`, {
@@ -3366,7 +3371,7 @@ async function payBudget(username, password, {
   }
 }
 
-async function transferOwnStructured(username, password, { fromAccount, toAccount, amount, purpose = '', sign = false }) {
+async function transferOwnStructured(username, password, { fromAccount, toAccount, amount, purpose = '', sign = false, docNumber = '', docDate = '' }) {
   const p = await ensureLoggedIn(username, password)
   const ready = await waitForAppReady(p, 45000)
   if (!ready) throw new Error('Интерфейс ДБО не загрузился')

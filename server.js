@@ -501,13 +501,13 @@ app.get('/api/tariffs', async (req, res) => {
 
 
 app.post('/api/transfer-own', async (req, res) => {
-  const { fromAccount, toAccount, amount, purpose, sign } = req.body || {}
+  const { fromAccount, toAccount, amount, purpose, sign, docNumber, docDate } = req.body || {}
   if (!fromAccount || !toAccount || !amount) return res.status(400).json({ success:false, error:'fromAccount, toAccount, amount обязательны' })
   try {
     // Структурный API вместо кликов по форме: счета выбираются по идентификатору,
     // поэтому не бывает «счёт получателя не выбран». success = реальный итог банка.
     audit('transfer.create', 'info', { fromAccount, toAccount, amount, purpose })
-    const data = await transferOwnStructured(dbo().login, dbo().password, { fromAccount, toAccount, amount, purpose, sign: !!sign })
+    const data = await transferOwnStructured(dbo().login, dbo().password, { fromAccount, toAccount, amount, purpose, sign: !!sign, docNumber, docDate })
     invalidateCache()   // появился новый документ — список устарел
     audit('transfer.create', data.ok !== false ? 'ok' : 'error',
       { fromAccount, toAccount, amount, docId: data.id, error: data.error })
