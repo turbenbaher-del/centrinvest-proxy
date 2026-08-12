@@ -3680,12 +3680,22 @@ async function findCreatedDoc(p, { amount, purpose }) {
     const list = r.json?.list || r.json?.data?.list || []
     const sum = Number(amount).toFixed(2)
     const norm = s => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase()
-    const hits = list.filter(x =>
-      x.state === 'new' &&
-      Number(x.sum).toFixed(2) === sum &&
-      (!purpose || norm(x.purpose) === norm(purpose)))
-    if (!hits.length) return undefined
-    const last = hits.sort((a, b) => Number(a.docNumber || 0) - Number(b.docNumber || 0)).pop()
+    // Назначение сверяем НЕ на равенство: банк дописывает в него фразу про
+    // НДС («в т.ч. НДС 22% …», «НДС не облагается»), и точное сравнение
+    // никогда не совпадало — документ считался ненайденным, а человек не
+    // попадал на подпись и шёл искать его в реестре руками.
+    const startsSame = (a, b) => {
+      const x = norm(a), y = norm(b)
+      if (!y) return true
+      return x.startsWith(y) || y.startsWith(x) || x.includes(y)
+    }
+    const fresh = list.filter(x => x.state === 'new' && Number(x.sum).toFixed(2) === sum)
+    const hits = fresh.filter(x => startsSame(x.purpose, purpose))
+    // Если по назначению не сошлось — берём свежий документ на ту же сумму:
+    // он только что создан нами, других таких в черновиках обычно нет.
+    const pool = hits.length ? hits : fresh
+    if (!pool.length) return undefined
+    const last = pool.sort((a, b) => Number(a.docNumber || 0) - Number(b.docNumber || 0)).pop()
     console.log('[transfer2] созданный документ №' + last.docNumber, '| id:', String(last.id).slice(0, 16) + '…')
     return last.id
   } catch (e) {
