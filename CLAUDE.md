@@ -50,6 +50,11 @@ railway up --service delightful-essence --ci
 
 Запись: `/api/login`, `/api/logout`, `/api/payments` (POST), `/api/transfer-own` (POST).
 
+Подпись: `/api/documents/:id/sign/means` (чтение, попытку ввода ключа не
+расходует), `/sign/start`, `/sign/key`, `/sign/status`, `/sign/sync`,
+`/sign/cancel`. Ответ всегда сообщает, чего банк ждёт дальше: `needKey`,
+`confirm` (PayControl), `sync`, `done`, `signed`, `error`.
+
 Отладочные: `/api/nav-debug`, `/api/payments-debug`, `/debug/*` — отдают куски DOM
 и сырые ответы банка, то есть реальные данные. Все они закрыты токеном.
 
@@ -70,6 +75,14 @@ railway up --service delightful-essence --ci
 
 - `browser.js` — общая сессия Playwright (`ensureLoggedIn`), из неё работают все
   функции чтения.
+- `sign.js` — подпись документов. Идёт **через формы банка**, тем же путём, что
+  и веб-версия: `_sign` в «Моих документах» → `client/cryptoProfileSelect` →
+  `client/eTokenPassSign` / `client/smsSign` / `client/paycontrol/sign` →
+  `client/signResult` (отправка). Прежняя реализация звала REST
+  `prepareSign`/`continueSign`, и банк отвечал «Введен неверный пароль» на
+  верный ключ с токена — этот путь удалён, чтобы не остался вторым, неверным.
+  Порядок шагов задаёт банк: модуль разбирает пришедшую форму, а не проигрывает
+  сценарий. Ключ, код из СМС и подтверждение PayControl вводит только человек.
 - `webpay.js` — отправка платежа через внутренний REST банка (`/api/v1/ui/.../doAction`),
   надёжнее, чем клики по форме.
 - `parsePaymentLines` — разбор текста выписки. Отсюда берутся операции.
@@ -103,6 +116,9 @@ railway up --service delightful-essence --ci
 ## Правила работы
 
 - Общение и комментарии в коде — на русском.
-- Проверять правки: `node --check browser.js && node --check server.js`.
+- Проверять правки: `node --check browser.js && node --check server.js && node --check sign.js`.
+- Подпись можно проверять без похода в банк: `node sign-selftest.js` прогоняет
+  её по подставному банку, отвечающему как живая веб-версия (шесть сценариев,
+  включая неверный код, синхронизацию токена и PayControl).
 - Разбор выписки можно проверять без похода в банк — на сохранённом тексте страницы
   (`_ui.json`, поле `bodyText`).

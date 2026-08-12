@@ -16,7 +16,10 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getMustRead, confirmMustRead, getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, signStart, signMeans, signStatus, signSubmitKey, signSyncToken, signCancel, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi, getBanners, getBannerImage } = require('./browser')
+const { getMustRead, confirmMustRead, getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi, getBanners, getBannerImage } = require('./browser')
+// Подпись живёт отдельно: она идёт через формы банка, тем же путём, что и
+// веб-версия (см. шапку sign.js).
+const { signStart, signMeans, signStatus, signSubmitKey, signSyncToken, signCancel } = require('./sign')
 const { audit, auditTail, maskAccount } = require('./audit')
 const { getAcquiring } = require('./acquiring')
 const { prepareTariffChange, signTariffChange } = require('./tariff')
