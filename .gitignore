@@ -8,6 +8,8 @@ node_modules/
 .deviceid
 _token.txt
 _*.xml
+# Скрипты и выгрузки сверки с веб-версией: в них живые документы и суммы
+_sverka/
 _*.json
 _*.png
 recon-documents.json
