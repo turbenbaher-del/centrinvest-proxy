@@ -77,6 +77,7 @@ async function doLogin(username, password) {
   // банка из уже открытой страницы, не логинясь второй раз. Отдельный вход
   // ради формы платежа удваивал нагрузку на банк.
   sessionAuthToken = null
+  accountIdCache = null            // новая сессия — счета спросим заново
   page.on('request', (r) => {
     const t = r.headers()['authtoken']
     if (t) sessionAuthToken = t
@@ -197,6 +198,7 @@ async function browserSafeClose() {
   page = null
   sessionExpiry = 0
   sessionAuthToken = null
+  accountIdCache = null
 }
 
 /**
@@ -2281,6 +2283,26 @@ async function docSearch(p, module, { filters = {}, limit = 50, offset = 0, sort
 }
 
 /**
+ * Номера счетов → идентификаторы счетов в банке.
+ *
+ * Список счетов за сессию не меняется, поэтому держим его в памяти:
+ * лишний запрос к банку на каждую выписку — это и время, и лимит частоты.
+ */
+let accountIdCache = null
+async function accountIds(p, numbers) {
+  const want = numbers.map(n => String(n).replace(/\D/g, '')).filter(Boolean)
+  if (!want.length) return []
+  if (!accountIdCache) {
+    const r = await bankApi(p, 'GET', '/api/v1/client/accounts/list?_offset=0&_limit=50', null)
+    const list = r.json?.list || r.json || []
+    accountIdCache = new Map(
+      (Array.isArray(list) ? list : []).map(a => [String(a.accountNumber || a.number || '').replace(/\D/g, ''), a.id])
+    )
+  }
+  return want.map(n => accountIdCache.get(n)).filter(Boolean)
+}
+
+/**
  * Операции по выписке ПО ВСЕМ СЧЕТАМ за период.
  * Отдельный модуль statements/operations — не тот, что doc/statements/byPeriod:
  * последний отдаёт только обороты по счёту (дебет/кредит), без самих операций.
@@ -2292,7 +2314,14 @@ async function getOperations(username, password, { dateFrom, dateTo, accounts, o
   if (dateFrom) filters.dateFrom = dateFrom
   if (dateTo) filters.dateTo = dateTo
   if (orgId) filters.orgId = orgId
-  if (accounts && accounts.length) filters.accounts = accounts   // не задан — значит все счета
+  // Фильтр банка ждёт ВНУТРЕННИЕ идентификаторы счетов, а не их номера:
+  // на двадцатизначный номер он отвечает 500, поиск падает и выписка молча
+  // уходила на медленный обход страниц (проверено на живой сессии 12.08.2026).
+  if (accounts && accounts.length) {
+    const ids = await accountIds(p, accounts)
+    if (ids.length) filters.accounts = ids
+    else console.warn('[operations] счёт', accounts.join(','), 'у банка не найден — беру все счета')
+  }   // не задан — значит все счета
 
   // Сортировку делает БАНК: минус в конце имени поля — по убыванию, свежие
   // первыми. Это снимает всю возню с угадыванием смещения: раньше операции
