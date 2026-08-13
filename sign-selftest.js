@@ -131,11 +131,20 @@ async function fakeBankApi(p, method, url, body) {
       })])
     }
     if (body.fields?.cryptoProfiles?.value !== 'CP-SMS') throw new Error('выбрано не то средство: ' + JSON.stringify(body.fields))
-    return wrap([cmd('client/eTokenPassSign', 'T-etoken', {
-      actions: { ready: { label: 'Подписать' }, _close: { label: 'Отмена' } },
-      fields: { docDesc: { value: 'Платёжное поручение №54 на 1,00 ₽' }, serial: { value: '0123456789' }, key: { value: '' } },
-      params: { maxAttempts: 3 },
-    })])
+    // Банк присылает вокруг новой формы служебные команды по ЗАКРЫТОМУ окну
+    // выбора — touchFields и formClose с тем же именем. Приняв touchFields за
+    // форму, сервис видел пустой список средств и падал с «банк не предложил
+    // ни одного средства подписи», хотя рядом лежало окно ввода ключа
+    // (живой прогон 13.08.2026).
+    return wrap([
+      { command: 'touchFields', instanceName: 'client/cryptoProfileSelect', instanceToken: 'T-sel', fields: {} },
+      { command: 'formClose', instanceName: 'client/cryptoProfileSelect' },
+      cmd('client/eTokenPassSign', 'T-etoken', {
+        actions: { ready: { label: 'Подписать' }, _close: { label: 'Отмена' } },
+        fields: { docDesc: { value: 'Платёжное поручение №54 на 1,00 ₽' }, serial: { value: '0123456789' }, key: { value: '' } },
+        params: { maxAttempts: 3 },
+      }),
+    ])
   }
 
   if (k === 'PUT /api/v1/client/eTokenPassSign/stateUpdate') {
