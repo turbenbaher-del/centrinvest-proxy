@@ -324,11 +324,34 @@ async function openSignAction(p, id) {
     }
 
     console.log('[sign] документ найден во вкладке', tab.key, '| строка отмечена | нажимаю', actionId)
-    const res = await doAction(p, form, actionId, {
+    // Тело действия — РОВНО то, что шлёт веб-версия (её sendAction принимает
+    // actionId, fields, instanceToken, ids, extActionId — и НЕ принимает rowId).
+    // С лишним `rowId` банк отвечал ПУСТЫМ списком команд: ни форм, ни ошибки,
+    // ни диалога — подпись просто не начиналась (живой прогон 13.08.2026).
+    let res = await doAction(p, form, actionId, {
       fields: { [MIXED_GRID]: { value: [String(id)] } },
-      rowId: String(id),
       ids: [String(id)],
     })
+
+    // Пустой ответ — не «нет данных», а «банк не понял запрос». Печатаем, что
+    // он реально прислал, и пробуем отметить строку вторым способом: галочкой
+    // в самой строке (колонка `selected`), как это делает клик в интерфейсе.
+    if (!(res.json?.commands || []).length) {
+      console.log('[sign] банк ответил пусто: статус', res.status,
+        '| тело:', JSON.stringify(res.json).slice(0, 300))
+      await bankApi(p, 'PUT', `/api/v1/${form.instanceName}/stateUpdate`, {
+        instanceToken: form.instanceToken,
+        rowId: String(id),
+        submitField: 'selected',
+        fields: { selected: { value: true } },
+      }).catch(() => null)
+      res = await doAction(p, form, actionId, {
+        fields: { [MIXED_GRID]: { value: [String(id)] } },
+        ids: [String(id)],
+      })
+      console.log('[sign] вторая попытка →',
+        (res.json?.commands || []).map(c => `${c.command}:${c.instanceName}`).join(', ') || 'снова пусто')
+    }
     return { res, tab: tab.key, doc: row }
   }
 

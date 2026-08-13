@@ -564,7 +564,10 @@ app.post('/api/documents/:id/sign/start', async (req, res) => {
     const data = await signStart(dbo().login, dbo().password, {
       id: req.params.id, confirmProfileId, mainProfileId,
     })
-    audit('sign.start', 'ok', { docId: req.params.id, stage: data.stage, serial: data.serial })
+    // Текст отказа пишем в журнал: без него запись «stage: error» ничего не
+    // объясняет, и причину приходится спрашивать у человека с экрана.
+    audit('sign.start', 'ok', { docId: req.params.id, stage: data.stage, serial: data.serial,
+      error: (data.errors || [])[0] })
     res.json({ success: true, data })
   } catch (err) {
     console.error('[sign start]', err.message)
