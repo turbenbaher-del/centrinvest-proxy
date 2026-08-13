@@ -23,6 +23,7 @@ let sent = false
 let noSign = false
 let pages = 0
 let marked = false
+let docSigned = false
 
 async function fakeBankApi(p, method, url, body) {
   calls.push({ method, url, body })
@@ -38,7 +39,7 @@ async function fakeBankApi(p, method, url, body) {
     return wrap([
       cmd('ui/mixedDoc', 'T-root'),
       cmd('ui/mixedDoc/out/partlySigned', 'T-tab', {
-        actions: { _sign: { label: 'Подписать', disabled: true }, _send: { label: 'Отправить', disabled: true }, loadMore: { label: 'Показать ещё' } },
+        actions: { _sign: { label: 'Подписать', disabled: scenario === 'draft' }, _send: { label: 'Отправить' }, loadMore: { label: 'Показать ещё' }, _edit: { label: 'Редактировать' } },
         fields: { mixedDocs: { items: rows } },
       }),
     ])
@@ -71,8 +72,29 @@ async function fakeBankApi(p, method, url, body) {
         : [{ id: 'DOC-OTHER' }, { id: 'DOC-2ND' }, { id: 'DOC-1', description: 'Со второй страницы', actions: { sign: true } }] } },
     })])
   }
+  if (k === 'PUT /api/v1/ui/mixedDoc/out/partlySigned/doAction' && body.actionId === '_edit') {
+    // Черновик: банк открывает форму самого документа, в ней и живёт подпись
+    if (scenario !== 'draft') throw new Error('_edit нажат там, где подпись доступна в списке')
+    return wrap([
+      { command: 'formClose', instanceName: 'ui/mixedDoc/out/partlySigned' },
+      cmd('ui/rur/payment/r030base', 'T-base', { actions: { _close: { label: 'Закрыть' } } }),
+      cmd('ui/rur/payment/r030accounts', 'T-doc', {
+        actions: { _saveAndSign: { label: 'Подписать и отправить' }, _save: { label: 'Сохранить' }, close: { label: 'Закрыть' } },
+        fields: { documentSum: { value: '1.00' } },
+      }),
+    ])
+  }
+  if (k === 'PUT /api/v1/ui/rur/payment/r030accounts/doAction') {
+    if (body.actionId !== '_saveAndSign') throw new Error('в форме документа нажато: ' + body.actionId)
+    docSigned = true
+    return wrap([cmd('ui/messages/errorsSave', 'T-es', {
+      actions: { _back: { label: 'Вернуться к редактированию' }, _save: { label: 'Продолжить' } },
+      fields: { message: { value: 'Проверка контрагента: сведения не подтверждены' } },
+    })])
+  }
   if (k === 'PUT /api/v1/ui/mixedDoc/out/partlySigned/doAction') {
     if (body.actionId !== '_sign') throw new Error('нажато не то действие: ' + body.actionId)
+    if (scenario === 'draft') throw new Error('нажата выключенная кнопка списка вместо открытия документа')
     if (!marked) throw new Error('подпись нажата, пока строка не отмечена — банк держит кнопку выключенной')
     if (JSON.stringify(body.fields?.mixedDocs?.value) !== JSON.stringify(['DOC-1'])) {
       throw new Error('строка грида отмечена неверно: ' + JSON.stringify(body.fields))
@@ -296,6 +318,18 @@ const check = (cond, what) => { console.log((cond ? '  ✓ ' : '  ✗ ') + what)
   check(pages === 2, 'страниц догружено: ' + pages)
   await sign.signCancel(...creds, { id: 'DOC-1' })
   scenario = 'ok'
+
+  console.log('\n=== СЦЕНАРИЙ 7: черновик — подпись через сам документ ===')
+  // smsTries = 1: отказ по первому коду проверяется в сценарии 1, здесь важен
+  // сам путь черновика — открытие документа и «Подписать и отправить» в нём.
+  scenario = 'draft'; smsTries = 1; sent = false; marked = false; docSigned = false
+  const d1 = await sign.signStart(...creds, { id: 'DOC-1' })
+  show('черновик: старт', d1)
+  check(docSigned, 'нажата «Подписать и отправить» в форме документа, а не в списке')
+  check(d1.stage === 'needKey', 'банк просит ключ с токена')
+  await sign.signSubmitKey(...creds, { id: 'DOC-1', key: '111111' })
+  const d3 = await sign.signSubmitKey(...creds, { id: 'DOC-1', key: '654321' })
+  check(d3.stage === 'done', 'черновик подписан и отправлен')
 
   console.log('\n=== СЦЕНАРИЙ 3: подпись не начата ===')
   try {

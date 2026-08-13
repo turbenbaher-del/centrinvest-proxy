@@ -317,11 +317,19 @@ async function openSignAction(p, id) {
       && Object.keys(c.actions || {}).length)
     if (refreshed) form = refreshed
 
-    const actionId = actionOf(form, ['_sign', 'sign'], /^подпис/i, { allowDisabled: true })
-    if (!actionId) {
-      const have = Object.keys(form.actions || {}).join(', ') || 'ничего'
-      throw new Error(`во вкладке «${tab.key}» банк не дал действия подписи (есть: ${have})`)
-    }
+    // Как подписывать — решает банк, и у него два пути.
+    //
+    // «На подпись»: в списке доступно действие `_sign` — жмём его.
+    //
+    // «Черновики»: `_sign` в форме ВЫКЛЮЧЕН, а у строки нет действий вовсе.
+    // Черновик подписывается открытием самого документа: `_edit` открывает его
+    // форму (у перевода между своими — ui/rur/payment/r030accounts), а в ней
+    // есть «Подписать и отправить» — `_saveAndSign`. Именно этот путь снят с
+    // веб-версии (docs/СВЕРКА-С-ВЕБ-ВЕРСИЕЙ.md: цепочка начинается с doAction
+    // на форме платежа, а не на списке). Проверено на живом банке 13.08.2026:
+    // нажатие выключенного `_sign` банк оставляет без ответа — ноль команд.
+    const actionId = actionOf(form, ['_sign', 'sign'], /^подпис/i)
+    if (!actionId) return openViaDocument(p, form, id, tab, row)
 
     console.log('[sign] документ найден во вкладке', tab.key, '| строка отмечена | нажимаю', actionId)
     // Тело действия — РОВНО то, что шлёт веб-версия (её sendAction принимает
@@ -356,6 +364,44 @@ async function openSignAction(p, id) {
   }
 
   throw new Error('документ не найден среди тех, что ещё можно подписать — возможно, он уже подписан или отклонён')
+}
+
+/**
+ * Подпись черновика — через сам документ.
+ *
+ * `_edit` открывает форму документа (у перевода между своими это
+ * ui/rur/payment/r030accounts, у платежа контрагенту — r030contragent, у письма
+ * своя), а в ней банк даёт «Подписать и отправить» — `_saveAndSign`. Имя формы
+ * зависит от типа документа, поэтому ищем её ПО ДЕЙСТВИЮ, а не по имени: так
+ * подпись остаётся общей для всех типов.
+ *
+ * `_saveAndSign` сохраняет документ и сразу начинает подпись — так же, как
+ * кнопка в веб-версии. Нового документа при этом не создаётся: правится тот же.
+ */
+async function openViaDocument(p, listForm, id, tab, row) {
+  const opened = await doAction(p, listForm, '_edit', {
+    fields: { [MIXED_GRID]: { value: [String(id)] } },
+    ids: [String(id)],
+  })
+  const cmds = opened.json?.commands || []
+  const docForm = [...cmds].reverse().find(c =>
+    c.command === 'formInit' && c.instanceToken
+    && Object.keys(c.actions || {}).some(a => /saveAndSign/i.test(a)))
+  if (!docForm) {
+    const names = cmds.map(c => `${c.command}:${c.instanceName}`).join(', ') || 'ничего'
+    throw new Error(`банк не открыл документ для подписи (прислал: ${names})`)
+  }
+
+  const signAction = actionOf(docForm, ['_saveAndSign'], /подписать и отправить/i)
+  if (!signAction) {
+    throw new Error('в форме документа нет «Подписать и отправить» — возможно, у вас нет права подписи')
+  }
+
+  console.log('[sign] черновик открыт формой', docForm.instanceName, '| нажимаю', signAction)
+  const res = await doAction(p, docForm, signAction, { fields: {} })
+  console.log('[sign] после «Подписать и отправить» →',
+    (res.json?.commands || []).map(c => `${c.command}:${c.instanceName}`).join(', ') || 'пусто')
+  return { res, tab: tab.key, doc: row }
 }
 
 /**
