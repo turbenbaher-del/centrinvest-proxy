@@ -62,8 +62,19 @@ const lastForm = (cmds, ok) => [...(cmds || [])].reverse().find(c => c.command =
 function findGrid(form, want = '') {
   const fields = Object.entries(form?.fields || {})
   if (want && Array.isArray(form?.fields?.[want]?.items)) return want
-  const withColumns = fields.find(([, f]) => Array.isArray(f?.items) && Array.isArray(f?.columns) && f.columns.length)
-  if (withColumns) return withColumns[0]
+
+  // Берём поле с САМЫМ БОЛЬШИМ числом колонок, а не первое попавшееся с
+  // колонками. Проверка на живом банке 13.08.2026: у формы «Выдача наличных»
+  // и у зарплатных ведомостей кроме грида есть выпадающий список счетов —
+  // у него тоже есть колонка («Счет №»), и «первое с колонками» отдавало
+  // пять пустых счетов вместо документов. У настоящего грида колонок 6–9,
+  // у селектора одна-две.
+  const withColumns = fields
+    .filter(([, f]) => Array.isArray(f?.items) && Array.isArray(f?.columns) && f.columns.length)
+    .sort((a, b) => (b[1].columns.length - a[1].columns.length)
+      || (b[1].items.length - a[1].items.length))
+  if (withColumns.length) return withColumns[0][0]
+
   // Ни у одного поля нет колонок — берём самый населённый список
   const biggest = fields
     .filter(([, f]) => Array.isArray(f?.items))
