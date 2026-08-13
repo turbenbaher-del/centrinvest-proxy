@@ -22,6 +22,7 @@ const { getMustRead, confirmMustRead, getAccountsData, getPaymentsData, getTempl
 const { signStart, signMeans, signStatus, signSubmitKey, signSyncToken, signCancel } = require('./sign')
 const { audit, auditTail, maskAccount } = require('./audit')
 const { getAcquiring } = require('./acquiring')
+const { getBankSection, BANK_SECTIONS } = require('./bankSections')
 const { prepareTariffChange, signTariffChange } = require('./tariff')
 const webpay = require('./webpay') // reliable /api-ui/ REST payment sender (reversed 2026-07-03)
 
@@ -1318,6 +1319,33 @@ app.get('/api/acquiring/:key', async (req, res) => {
     res.json({ success: true, data })
   } catch (err) {
     console.error('[acquiring]', key, err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+/**
+ * Разделы банка на формах со свитчером: счета на оплату, запросы выписок,
+ * массовые платежи, касса и самоинкассация, зарплатные ведомости, заявки по
+ * депозитам и кредитам. Механика у всех одна — та же, что у эквайринга.
+ *
+ * Только чтение: отдаём строки грида и подписи колонок словами банка.
+ * Список доступных ключей — GET /api/bank-section (без ключа).
+ */
+app.get('/api/bank-section', (req, res) => {
+  res.json({ success: true, data: Object.entries(BANK_SECTIONS)
+    .map(([key, s]) => ({ key, title: s.title, dated: !!s.dated })) })
+})
+
+app.get('/api/bank-section/:key', async (req, res) => {
+  const key = String(req.params.key || '').trim()
+  const { from = '', to = '', search = '', limit = '' } = req.query
+  try {
+    const cacheKey = `sec2:${key}:${from}:${to}:${search}:${limit}`
+    const data = await cached(cacheKey, CACHE_TTL_MS, () =>
+      getBankSection(dbo(), key, { from, to, search, limit }))
+    res.json({ success: true, data })
+  } catch (err) {
+    console.error('[bank-section]', key, err.message)
     res.status(500).json({ success: false, error: err.message })
   }
 })
