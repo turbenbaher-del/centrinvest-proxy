@@ -305,7 +305,17 @@ async function openSignAction(p, id) {
       submitField: MIXED_GRID,
       fields: { [MIXED_GRID]: { value: [String(id)] } },
     })
-    form = lastForm(marked.json?.commands || [], new RegExp(`${tab.form}$`)) || form
+    // Форму заменяем ТОЛЬКО настоящей новой формой — с действиями. На
+    // выделение строки банк отвечает командой stateUpdate: у неё то же имя и
+    // тот же токен, но одни поля, без кнопок. Приняв её за форму, сервис терял
+    // `_sign` и отвечал «банк не дал действия подписи (есть: ничего)» —
+    // поймано на живом прогоне 13.08.2026.
+    const refreshed = [...(marked.json?.commands || [])].reverse().find(c =>
+      c.command === 'formInit'
+      && new RegExp(`${tab.form}$`).test(c.instanceName || '')
+      && c.instanceToken
+      && Object.keys(c.actions || {}).length)
+    if (refreshed) form = refreshed
 
     const actionId = actionOf(form, ['_sign', 'sign'], /^подпис/i, { allowDisabled: true })
     if (!actionId) {

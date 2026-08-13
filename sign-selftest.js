@@ -50,10 +50,17 @@ async function fakeBankApi(p, method, url, body) {
       throw new Error('отмечена не та строка: ' + JSON.stringify(body.fields))
     }
     marked = true
-    return wrap([cmd('ui/mixedDoc/out/partlySigned', 'T-tab-sel', {
-      actions: { _sign: { label: 'Подписать' }, loadMore: { label: 'Показать ещё' } },
-      fields: { mixedDocs: { items: [{ id: 'DOC-1' }] } },
-    })])
+    // Банк отвечает на выделение строки командой stateUpdate: то же имя формы,
+    // тот же токен, ОДНИ ПОЛЯ И НИ ОДНОЙ КНОПКИ. Приняв её за новую форму,
+    // сервис терял действие подписи (живой прогон 13.08.2026). Здесь это
+    // воспроизводится: если код заменит форму этим ответом, действий не
+    // останется и подпись не начнётся.
+    return wrap([{
+      command: 'stateUpdate',
+      instanceName: 'ui/mixedDoc/out/partlySigned',
+      instanceToken: 'T-tab',
+      fields: { mixedDocs: { items: [{ id: 'DOC-1', selected: true }] } },
+    }])
   }
   if (k === 'PUT /api/v1/ui/mixedDoc/out/partlySigned/doAction' && body.actionId === 'loadMore') {
     pages += 1
