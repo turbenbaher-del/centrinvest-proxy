@@ -25,22 +25,34 @@ const SECTIONS = {
   goods:      { menuItem: MENU.payments, mainForm: 'ui/mainForm', switcher: 'mainFormSwitcher', tab: 'goods',           title: 'Каталог товаров и услуг', dated: false },
   acts:       { menuItem: MENU.payments, mainForm: 'ui/mainForm', switcher: 'mainFormSwitcher', tab: 'actWorkComplete', title: 'Закрывающие документы', dated: true },
 
-  // «Прочие продукты» — касса, самоинкассация, выдача наличных
-  cashoper:   { menuItem: MENU.other, mainForm: 'ui/otherDocsMainForm', switcher: 'otherDocsSwither', tab: 'cashOperRequest',  title: 'Кассовые операции',      dated: true },
-  cashout:    { menuItem: MENU.other, mainForm: 'ui/otherDocsMainForm', switcher: 'otherDocsSwither', tab: 'cashFundsRequest', title: 'Выдача наличных',        dated: true },
-  selfcollect:{ menuItem: MENU.other, mainForm: 'ui/otherDocsMainForm', switcher: 'otherDocsSwither', tab: 'selfCollection',   title: 'Карты самоинкассации',   dated: true },
+  // «Прочие продукты» — касса, самоинкассация, выдача наличных.
+  // Свитчер здесь ДВУХУРОВНЕВЫЙ: «Кассовые операции» — заголовок, документы
+  // лежат в статусах под ним. Проверено на живом банке 13.08.2026: в заголовке
+  // ноль строк, в черновиках два заявления, в отклонённых одно — от 21.08.2020.
+  // Поэтому обходим статусы и сливаем; статус у банка есть колонкой в гриде.
+  cashoper:   { menuItem: MENU.other, mainForm: 'ui/otherDocsMainForm', switcher: 'otherDocsSwither', title: 'Кассовые операции и выдача наличных', dated: true,
+    tabs: ['cashOperationsDraft', 'cashOperationsPartlySigned', 'cashOperationsInProcess', 'cashOperationsCompleted', 'cashOperationsCanceled'] },
+  selfcollect:{ menuItem: MENU.other, mainForm: 'ui/otherDocsMainForm', switcher: 'otherDocsSwither', title: 'Карты самоинкассации', dated: true,
+    tabs: ['selfCollectionReqDraft', 'selfCollectionReqPartlySing', 'selfCollectionReqInProcess', 'selfCollectionReqCompleted', 'selfCollectionReqCanceled'] },
 
-  // Зарплатный проект
-  salary:     { menuItem: MENU.salary, mainForm: 'ui/salaryMainForm', switcher: 'salarySwitcher', tab: 'payrollCompleted', title: 'Зарплатные ведомости', dated: true },
+  // Зарплатный проект — тот же двухуровневый свитчер
+  salary:     { menuItem: MENU.salary, mainForm: 'ui/salaryMainForm', switcher: 'salarySwitcher', title: 'Зарплатные ведомости', dated: true,
+    tabs: ['payrollDraft', 'payrollPartlySigned', 'payrollInProcess', 'payrollCompleted', 'payrollCanceled'] },
   employees:  { menuItem: MENU.salary, mainForm: 'ui/salaryMainForm', switcher: 'salarySwitcher', tab: 'employeeSwitcher', title: 'Сотрудники',           dated: false },
 
   // Заявки по продуктам
-  depositreq: { menuItem: MENU.deposits, mainForm: 'ui/depositMainForm', switcher: 'depositMainFormSwitcher', tab: 'depositRequest',    title: 'Заявки на депозит',  dated: true },
-  depositadd: { menuItem: MENU.deposits, mainForm: 'ui/depositMainForm', switcher: 'depositMainFormSwitcher', tab: 'depositReplenish',  title: 'Пополнение депозита', dated: true },
-  depositout: { menuItem: MENU.deposits, mainForm: 'ui/depositMainForm', switcher: 'depositMainFormSwitcher', tab: 'depositDissolve',   title: 'Возврат депозита',    dated: true },
-  creditreq:  { menuItem: MENU.credits,  mainForm: 'ui/creditMainForm',  switcher: 'creditMainFormSwitcher',  tab: 'grantCredit',       title: 'Заявки на кредит',    dated: true },
-  credittran: { menuItem: MENU.credits,  mainForm: 'ui/creditMainForm',  switcher: 'creditMainFormSwitcher',  tab: 'creditTranche',     title: 'Выдача транша',       dated: true },
-  creditrep:  { menuItem: MENU.credits,  mainForm: 'ui/creditMainForm',  switcher: 'creditMainFormSwitcher',  tab: 'earlyRepayment',    title: 'Досрочное погашение', dated: true },
+  depositreq: { menuItem: MENU.deposits, mainForm: 'ui/depositMainForm', switcher: 'depositMainFormSwitcher', title: 'Заявки на депозит',  dated: true,
+    tabs: ['depositRequestDraft', 'depositRequestPartlySigned', 'depositRequestInProcess', 'depositRequestCompleted', 'depositRequestCanceled'] },
+  depositadd: { menuItem: MENU.deposits, mainForm: 'ui/depositMainForm', switcher: 'depositMainFormSwitcher', title: 'Пополнение депозита', dated: true,
+    tabs: ['depositReplenishDraft', 'depositReplenishPartlySigned', 'depositReplenishInProcess', 'depositReplenishCompleted', 'depositReplenishCanceled'] },
+  depositout: { menuItem: MENU.deposits, mainForm: 'ui/depositMainForm', switcher: 'depositMainFormSwitcher', title: 'Возврат депозита',    dated: true,
+    tabs: ['depositDissolveDraft', 'depositDissolvePartlySigned', 'depositDissolveInProcess', 'depositDissolveCompleted', 'depositDissolveCanceled'] },
+  creditreq:  { menuItem: MENU.credits,  mainForm: 'ui/creditMainForm',  switcher: 'creditMainFormSwitcher',  title: 'Заявки на кредит',    dated: true,
+    tabs: ['grantCreditDraft', 'grantCreditPartlySigned', 'grantCreditInProcess', 'grantCreditCompleted', 'grantCreditCanceled'] },
+  credittran: { menuItem: MENU.credits,  mainForm: 'ui/creditMainForm',  switcher: 'creditMainFormSwitcher',  title: 'Выдача транша',       dated: true,
+    tabs: ['creditTrancheDraft', 'creditTranchePartlySigned', 'creditTrancheInProcess', 'creditTrancheCompleted', 'creditTrancheCanceled'] },
+  creditrep:  { menuItem: MENU.credits,  mainForm: 'ui/creditMainForm',  switcher: 'creditMainFormSwitcher',  title: 'Досрочное погашение', dated: true,
+    tabs: ['earlyRepaymentDraft', 'earlyRepaymentPartlySigned', 'earlyRepaymentInProcess', 'earlyRepaymentCompleted', 'earlyRepaymentCanceled'] },
 }
 
 async function getBankSection(creds, key, opts = {}) {

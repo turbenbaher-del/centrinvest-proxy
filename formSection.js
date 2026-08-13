@@ -108,64 +108,117 @@ async function readFormTab(creds, spec, { from = '', to = '', search = '', limit
     .filter(i => i.visible !== false)
     .map(i => ({ id: i.id, label: i.label || (Array.isArray(i.values) ? i.values[0] : '') || i.id, parentId: i.parentId || null }))
 
-  let switched = []
-  if (spec.tab && switcherName) {
+  // Вкладок может быть несколько. У «Прочих продуктов» и зарплатного проекта
+  // свитчер двухуровневый: «Кассовые операции» — это ЗАГОЛОВОК, а документы
+  // лежат в статусах под ним (Черновики, На подпись, В обработке, Выполненные,
+  // Отклонённые). Проверено на живом банке 13.08.2026: в заголовке ноль строк,
+  // а в черновиках два заявления и в отклонённых одно. Поэтому для таких
+  // разделов обходим статусы и сливаем — статус у банка есть колонкой в самом
+  // гриде, придумывать его не приходится.
+  const wanted = Array.isArray(spec.tabs) && spec.tabs.length ? spec.tabs : (spec.tab ? [spec.tab] : [])
+  const switchTo = async (ext) => {
     const sw = await call('PUT', `/api/v1/${spec.mainForm}/doAction`, {
       instanceToken: main.instanceToken,
       actionId: `_switchForm_${switcherName}`,
-      extActionId: spec.tab,
+      extActionId: ext,
     })
-    switched = sw.json?.commands || []
+    return sw.json?.commands || []
+  }
+  let switched = []
+  const extraTabs = []
+  if (wanted.length && switcherName) {
+    switched = await switchTo(wanted[0])
+    for (const ext of wanted.slice(1)) extraTabs.push(await switchTo(ext))
   }
 
   const err = [...opened, ...switched].find(c => /errorDialog/.test(c.instanceName || ''))
   if (err) throw new Error(String(err.fields?.message?.value || err.fields?.message || 'раздел недоступен'))
 
-  // Форма вкладки — последняя, где есть грид
   const hasGrid = c => c.instanceName !== spec.mainForm && !!findGrid(c, spec.grid)
-  const form = lastForm(switched, hasGrid) || lastForm(opened, hasGrid)
-  if (!form) throw new Error(`банк не прислал вкладку «${spec.title}»`)
 
-  const gridName = findGrid(form, spec.grid)
-  const instance = form.instanceName
-  let token = form.instanceToken
-  let columns = columnsOf(form.fields[gridName])
+  /** Прочитать одну вкладку: строки грида, подписи колонок, догрузка страниц. */
+  const readTab = async (cmds, fallbackCmds = null) => {
+    const form = lastForm(cmds, hasGrid) || (fallbackCmds && lastForm(fallbackCmds, hasGrid))
+    if (!form) return null
 
-  const known = new Map()
-  let order = []
-  const absorb = (list) => {
-    for (const c of list || []) {
-      const field = c.fields?.[gridName]
-      if (!field || !Array.isArray(field.items)) continue
-      if (c.instanceToken) token = c.instanceToken
-      if (field.columns?.length) columns = columnsOf(field)
-      order = field.items.map((it) => {
-        const row = { ...(known.get(it?.id) || {}), ...cleanRow(it) }
-        if (row.id) known.set(row.id, row)
-        return row
-      })
+    const gridName = findGrid(form, spec.grid)
+    const instance = form.instanceName
+    let token = form.instanceToken
+    let columns = columnsOf(form.fields[gridName])
+
+    // Значения копим по id: при догрузке банк присылает уже показанные строки
+    // одним идентификатором, без содержимого.
+    const known = new Map()
+    let order = []
+    const absorb = (list) => {
+      for (const c of list || []) {
+        const field = c.fields?.[gridName]
+        if (!field || !Array.isArray(field.items)) continue
+        if (c.instanceToken) token = c.instanceToken
+        if (field.columns?.length) columns = columnsOf(field)
+        order = field.items.map((it) => {
+          const row = { ...(known.get(it?.id) || {}), ...cleanRow(it) }
+          if (row.id) known.set(row.id, row)
+          return row
+        })
+      }
+    }
+    absorb([form])
+
+    const fields = {}
+    if (spec.dated && from && form.fields?.dateFrom) fields.dateFrom = { value: from }
+    if (spec.dated && to && form.fields?.dateTo) fields.dateTo = { value: to }
+    if (search && form.fields?.search) fields.search = { value: search }
+    if (Object.keys(fields).length && form.actions?.applyFilter) {
+      const r = await call('PUT', `/api/v1/${instance}/doAction`, { instanceToken: token, actionId: 'applyFilter', fields })
+      known.clear()   // фильтр меняет выборку — старые строки к ней отношения не имеют
+      absorb(r.json?.commands)
+    }
+
+    let pages = 0
+    let growing = order.length > 0
+    while (order.length < want && pages < PAGE_MAX && form.actions?.loadMore) {
+      const before = order.length
+      const r = await call('PUT', `/api/v1/${instance}/doAction`, { instanceToken: token, actionId: 'loadMore' })
+      absorb(r.json?.commands)
+      pages++
+      if (order.length <= before) { growing = false; break }
+    }
+
+    return { rows: order.filter(r => Object.keys(r).length), columns, instance, gridName, growing, actions: Object.keys(form.actions || {}) }
+  }
+
+  const first = await readTab(switched, opened)
+  if (!first) throw new Error(`банк не прислал вкладку «${spec.title}»`)
+
+  // Строки со всех запрошенных вкладок в одном списке. Дубли по id не берём:
+  // документ виден только в одном статусе, но подстраховка дешевле разбора
+  // «почему заявление показано дважды».
+  const seen = new Set()
+  const order = []
+  const push = (part) => {
+    for (const r of part?.rows || []) {
+      const k = String(r.id || JSON.stringify(r))
+      if (seen.has(k)) continue
+      seen.add(k)
+      order.push(r)
     }
   }
-  absorb([form])
+  push(first)
+  let columns = first.columns
+  let growing = first.growing
+  const instance = first.instance
+  const gridName = first.gridName
 
-  const fields = {}
-  if (spec.dated && from && form.fields?.dateFrom) fields.dateFrom = { value: from }
-  if (spec.dated && to && form.fields?.dateTo) fields.dateTo = { value: to }
-  if (search && form.fields?.search) fields.search = { value: search }
-  if (Object.keys(fields).length && form.actions?.applyFilter) {
-    const r = await call('PUT', `/api/v1/${instance}/doAction`, { instanceToken: token, actionId: 'applyFilter', fields })
-    known.clear()   // фильтр меняет выборку — старые строки к ней отношения не имеют
-    absorb(r.json?.commands)
-  }
-
-  let pages = 0
-  let growing = order.length > 0
-  while (order.length < want && pages < PAGE_MAX && form.actions?.loadMore) {
-    const before = order.length
-    const r = await call('PUT', `/api/v1/${instance}/doAction`, { instanceToken: token, actionId: 'loadMore' })
-    absorb(r.json?.commands)
-    pages++
-    if (order.length <= before) { growing = false; break }
+  for (const cmds of extraTabs) {
+    const part = await readTab(cmds)
+    if (!part) continue
+    push(part)
+    // Подписи колонок берём самые полные: в пустой вкладке банк присылает
+    // урезанный набор (у выполненных кассовых операций 8 колонок против 11
+    // в черновиках), и по ней экран потерял бы половину полей.
+    if (part.columns.length > columns.length) columns = part.columns
+    growing = growing || part.growing
   }
 
   const rows = order.filter(r => Object.keys(r).length)
@@ -184,7 +237,7 @@ async function readFormTab(creds, spec, { from = '', to = '', search = '', limit
     tabs,
     // Действия вкладки нужны экрану, чтобы честно решать, что можно предложить:
     // «Создать счёт» рисуем, только если банк дал createInvoice.
-    actions: Object.keys(form.actions || {}),
+    actions: first.actions,
   }
 }
 
