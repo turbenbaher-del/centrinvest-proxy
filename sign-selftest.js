@@ -153,6 +153,17 @@ async function fakeBankApi(p, method, url, body) {
   }
   if (k === 'PUT /api/v1/client/eTokenPassSign/doAction') {
     if (body.actionId !== 'ready') throw new Error('на форме токена нажато: ' + body.actionId)
+    if (scenario === 'badkey') {
+      // Отказ по ключу банк присылает НЕ формой, а командой showOperationResult,
+      // и окно ввода не закрывает — ввести можно ещё раз. На живом прогоне
+      // 13.08.2026 сервис этот текст терял и показывал «документ остался
+      // черновиком», из-за чего впустую ушла вторая попытка токена.
+      return wrap([
+        { command: 'showOperationResult', instanceName: 'messages/errorDialog',
+          fields: { message: { value: 'Неверный ключ. Осталось попыток: 2' } } },
+        { command: 'stateUpdate', instanceName: 'client/eTokenPassSign', instanceToken: 'T-etoken', fields: {} },
+      ])
+    }
     if (scenario === 'sync') {
       return wrap([cmd('client/eTokenPassSynchronize', 'T-sync', {
         actions: { ready: { label: 'Подписать' } },
@@ -339,6 +350,18 @@ const check = (cond, what) => { console.log((cond ? '  ✓ ' : '  ✗ ') + what)
   await sign.signSubmitKey(...creds, { id: 'DOC-1', key: '111111' })
   const d3 = await sign.signSubmitKey(...creds, { id: 'DOC-1', key: '654321' })
   check(d3.stage === 'done', 'черновик подписан и отправлен')
+
+  console.log('\n=== СЦЕНАРИЙ 8: отказ банка по ключу — текст виден, шаг сохранён ===')
+  scenario = 'ok'; smsTries = 1; sent = false; marked = false; docSigned = false
+  await sign.signStart(...creds, { id: 'DOC-1' })
+  scenario = 'badkey'
+  const bad = await sign.signSubmitKey(...creds, { id: 'DOC-1', key: '000000' })
+  show('неверный ключ', bad)
+  check(bad.stage === 'needKey', 'человек остался на вводе ключа, подпись не оборвана')
+  check((bad.errors || [])[0] === 'Неверный ключ. Осталось попыток: 2', 'показан текст банка, а не свой')
+  scenario = 'ok'
+  const good = await sign.signSubmitKey(...creds, { id: 'DOC-1', key: '111111' })
+  check(good.stage === 'needKey' && good.mean.kind === 'otp', 'после верного ключа банк просит код из СМС')
 
   console.log('\n=== СЦЕНАРИЙ 3: подпись не начата ===')
   try {

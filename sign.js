@@ -107,6 +107,17 @@ const text = (f) => {
 const lastForm = (cmds, re) => [...(cmds || [])].reverse()
   .find(c => c.command === 'formInit' && re.test(c.instanceName || '') && c.instanceToken)
 
+/**
+ * Любая команда банка по имени окна — не только форма.
+ *
+ * Отказы и сообщения прилетают командами `showOperationResult`, `touchFields`
+ * и другими: у них то же имя окна, но это не formInit. Для ТЕКСТА этого
+ * достаточно, а вот как форму (с полями и кнопками) их брать нельзя — см.
+ * lastForm.
+ */
+const anyByName = (cmds, re) => [...(cmds || [])].reverse()
+  .find(c => c.command !== 'formClose' && re.test(c.instanceName || ''))
+
 /** Жёсткие ошибки полей — банк отказал по существу. */
 const fieldErrors = (cmds) => (cmds || [])
   .flatMap(c => Object.entries(c.fields || {}))
@@ -477,11 +488,34 @@ async function drive(p, id, response) {
     const cmds = r.json?.commands || []
     console.log('[sign] банк прислал:', cmds.map(c => `${c.command}:${c.instanceName}`).join(', ') || '(пусто)')
 
-    // Отказ по существу — дальше идти незачем
-    const err = lastForm(cmds, RE.error)
+    // Отказ банка приходит НЕ ТОЛЬКО формой: на неверный ключ он прислал его
+    // командой `showOperationResult` с именем messages/errorDialog, а рядом —
+    // stateUpdate по всё ещё открытому окну ввода ключа. Поэтому такие окна
+    // ищем по имени, независимо от типа команды: иначе текст банка теряется, и
+    // человек видит бессмысленное «документ остался черновиком» вместо
+    // «неверный ключ» — и тратит следующую попытку впустую (живой прогон
+    // 13.08.2026, две попытки токена ушли именно так).
+    const err = anyByName(cmds, RE.error)
     if (err) {
+      const said = collectMessages(err) || 'банк отклонил подпись'
+      console.log('[sign] банк отказал:', said.slice(0, 200))
+      // Окно ввода ключа банк не закрыл — значит, можно ввести ещё раз.
+      // Возвращаем человека на тот же шаг с текстом банка, а не обрываем
+      // подпись: обрыв заставил бы начинать заново и стоил бы ещё попытки.
+      if (pend.form && ['needKey', 'payControl', 'sync'].includes(pend.stage)) {
+        if (typeof pend.attemptsLeft === 'number') pend.attemptsLeft -= 1
+        pending.set(key, pend)
+        return {
+          stage: pend.stage === 'payControl' ? 'confirm' : pend.stage,
+          confirmType: pend.stage === 'payControl' ? 'payControl' : undefined,
+          serial: pend.serial || '',
+          attempts: pend.attemptsLeft,
+          mean: { kind: pend.kind, label: labelOf(pend.kind) },
+          errors: [said],
+        }
+      }
       pending.delete(key)
-      return { stage: 'error', errors: [collectMessages(err) || 'банк отклонил подпись'] }
+      return { stage: 'error', errors: [said] }
     }
     const hard = fieldErrors(cmds.filter(c => !RE.sms.test(c.instanceName || '') && !RE.eToken.test(c.instanceName || '')))
     if (hard.length) {
