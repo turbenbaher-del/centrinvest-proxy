@@ -45,6 +45,12 @@ async function getBrowser() {
 // и включал временное ограничение, а запросы висели по 30–40 секунд.
 let loginInFlight = null
 
+// Пауза после того, как банк отверг сессию. Без неё каждый запрос приложения
+// начинал новый вход: за час набирался десяток попыток, банк включал временное
+// ограничение, и разобраться, что происходит, было невозможно.
+const LOGIN_COOLDOWN_MS = 3 * 60 * 1000
+let loginBlockedUntil = 0
+
 /**
  * Жива ли страница банка на самом деле.
  *
@@ -83,6 +89,10 @@ async function ensureLoggedIn(username, password) {
     sessionAuthToken = null
   }
   if (loginInFlight) return loginInFlight
+  if (Date.now() < loginBlockedUntil) {
+    const left = Math.ceil((loginBlockedUntil - Date.now()) / 1000)
+    throw new Error(`Банк отклонил вход. Ждём ${left} с, прежде чем пробовать снова — частые попытки банк ограничивает. Проверьте, не открыт ли банк в веб-версии или в приложении «Центр-инвест Бизнес».`)
+  }
   loginInFlight = doLogin(username, password).finally(() => { loginInFlight = null })
   return loginInFlight
 }
@@ -232,11 +242,18 @@ async function doLogin(username, password) {
   // Сессию мог сбросить сам банк: у него ОДНА сессия на клиента, и вход в
   // веб-версию или в мобильное приложение банка выбрасывает нашу. Тогда после
   // успешного входа страница снова оказывается на login.html.
+  page.off('requestfailed', onFail)
   if (page.url().includes('login.html')) {
     console.warn('[browser] после входа снова страница входа — сессию кто-то перебил')
     if (netFails.length) console.warn('[browser] сбои на странице:', netFails.join(' | ').slice(0, 500))
+    // Пауза вместо новой попытки. Каждый запрос приложения (счета, документы,
+    // письма, баннеры) при живом пароле поднимал новый вход, и за час их
+    // набирался десяток — банк такое ограничивает, а учётную запись может и
+    // заблокировать. Держим паузу и отвечаем понятной причиной.
+    loginBlockedUntil = Date.now() + LOGIN_COOLDOWN_MS
+    await browserSafeClose()
+    throw new Error('Банк сбросил сессию сразу после входа. Обычно это значит, что в банк вошли ещё откуда-то — из веб-версии или из приложения «Центр-инвест Бизнес»: у банка одна сессия на клиента. Закройте другие входы и повторите через 3 минуты.')
   }
-  page.off('requestfailed', onFail)
   console.log('[browser] Logged in, URL:', page.url())
   sessionExpiry = Date.now() + 20 * 60 * 1000
   return page
