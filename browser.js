@@ -244,8 +244,30 @@ async function doLogin(username, password) {
   // успешного входа страница снова оказывается на login.html.
   page.off('requestfailed', onFail)
   if (page.url().includes('login.html')) {
-    console.warn('[browser] после входа снова страница входа — сессию кто-то перебил')
+    console.warn('[browser] после входа снова страница входа')
     if (netFails.length) console.warn('[browser] сбои на странице:', netFails.join(' | ').slice(0, 500))
+    // Что банк написал НА САМОЙ странице. Без этого «сессию сбросили» и
+    // «неверный пароль» выглядят одинаково, а лечатся по-разному.
+    try {
+      const said = await page.evaluate(() => {
+        const texts = (sel) => [...document.querySelectorAll(sel)]
+          .map((e) => (e.innerText || '').replace(/\s+/g, ' ').trim())
+          .filter((t) => t && t.length < 300)
+        const errors = [...new Set([
+          ...texts('[class*="error" i]'), ...texts('[class*="alert" i]'),
+          ...texts('[role="alert"]'), ...texts('[class*="message" i]'),
+        ])].slice(0, 5)
+        const body = (document.body.innerText || '').replace(/\s+/g, ' ')
+        // Слова, по которым видно причину, даже если разметка ошибки другая
+        const hints = ['неверн', 'заблокир', 'ограничен', 'истек', 'истёк',
+          'превышен', 'попыт', 'недоступ', 'ошибк', 'смените пароль', 'плагин']
+          .filter((w) => body.toLowerCase().includes(w))
+        return { url: location.href, errors, hints, len: body.length }
+      })
+      console.warn('[browser] страница входа говорит:', JSON.stringify(said).slice(0, 700))
+    } catch (e) {
+      console.warn('[browser] текст страницы входа не снялся:', e.message)
+    }
     // Пауза вместо новой попытки. Каждый запрос приложения (счета, документы,
     // письма, баннеры) при живом пароле поднимал новый вход, и за час их
     // набирался десяток — банк такое ограничивает, а учётную запись может и
