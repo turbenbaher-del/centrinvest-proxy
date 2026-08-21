@@ -143,6 +143,19 @@ async function doLogin(username, password) {
   }
   // '#btn' раскрывает форму «вход по логину/паролю» (поля скрыты до клика)
   try { await page.click('#btn', { timeout: 3000 }) } catch {}
+  // Диагностика входа: что именно сломалось, если банк вернёт на login.html.
+  // Без неё в логах остаётся только «интерфейс не отрисовался», и причина —
+  // сброшенная сессия, отказ по сети или недоверенный сертификат — неотличимы.
+  const netFails = []
+  const onFail = (req) => {
+    const why = req.failure()?.errorText || ''
+    if (netFails.length < 8) netFails.push(`${why} ${req.url().slice(0, 90)}`)
+  }
+  page.on('requestfailed', onFail)
+  page.on('pageerror', (e) => {
+    if (netFails.length < 12) netFails.push('ошибка страницы: ' + String(e.message).slice(0, 90))
+  })
+
   await page.fill('#userName', username.toLowerCase(), { timeout: 15000 })
   await page.fill('#password', password, { timeout: 15000 })
   await page.click('#submitButton')
@@ -216,6 +229,14 @@ async function doLogin(username, password) {
 
   await waitForAppReady(page)
 
+  // Сессию мог сбросить сам банк: у него ОДНА сессия на клиента, и вход в
+  // веб-версию или в мобильное приложение банка выбрасывает нашу. Тогда после
+  // успешного входа страница снова оказывается на login.html.
+  if (page.url().includes('login.html')) {
+    console.warn('[browser] после входа снова страница входа — сессию кто-то перебил')
+    if (netFails.length) console.warn('[browser] сбои на странице:', netFails.join(' | ').slice(0, 500))
+  }
+  page.off('requestfailed', onFail)
   console.log('[browser] Logged in, URL:', page.url())
   sessionExpiry = Date.now() + 20 * 60 * 1000
   return page
