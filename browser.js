@@ -45,13 +45,42 @@ async function getBrowser() {
 // и включал временное ограничение, а запросы висели по 30–40 секунд.
 let loginInFlight = null
 
+/**
+ * Жива ли страница банка на самом деле.
+ *
+ * Проверять `page.url()` бесполезно: у ЗАКРЫТОЙ страницы Playwright спокойно
+ * возвращает последний адрес и ничего не бросает. Из-за этого сервис до самого
+ * перезапуска раздавал мёртвую страницу, каждый запрос падал с «Target page,
+ * context or browser has been closed», а /health при этом бодро отвечал
+ * `dboReady: true` — приложение показывало пустые разделы без объяснений
+ * (поймано 21.08.2026). Спрашиваем честно: закрыта ли страница и жив ли
+ * браузер.
+ */
+function isPageAlive() {
+  try {
+    if (!page || page.isClosed()) return false
+    const b = page.context()?.browser()
+    return !!b && b.isConnected()
+  } catch {
+    return false
+  }
+}
+
 async function ensureLoggedIn(username, password) {
   const now = Date.now()
-  if (page && now < sessionExpiry) {
+  if (page && now < sessionExpiry && isPageAlive()) {
     try {
       const url = page.url()
       if (!url.includes('login.html')) return page
     } catch {}
+  }
+  // Браузер мог упасть (в контейнере это чаще всего нехватка памяти). Пароль
+  // при этом остаётся в памяти сервиса, поэтому вход поднимается сам — человека
+  // дёргать не нужно.
+  if (page && !isPageAlive()) {
+    console.warn('[browser] страница банка закрыта — поднимаю сессию заново')
+    page = null
+    sessionAuthToken = null
   }
   if (loginInFlight) return loginInFlight
   loginInFlight = doLogin(username, password).finally(() => { loginInFlight = null })
@@ -3931,4 +3960,4 @@ async function reconDocuments(username, password) {
 // bankApi/bankBinary/pickConfirmAction/collectMessages/DOC_STATE_NAMES наружу
 // нужны модулю подписи (sign.js): он разговаривает с формами банка из этой же
 // сессии Playwright и разбирает те же ответы.
-module.exports = { getMustRead, confirmMustRead, getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi, waitForAppReady, getBanners, getBannerImage, bankApi, bankBinary, pickConfirmAction, collectMessages, DOC_STATE_NAMES, SIGN_MODULE }
+module.exports = { isPageAlive, getMustRead, confirmMustRead, getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, docList, docGet, docSave, docValidate, docSend, docCanDo, docSearch, ensureLoggedIn, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, callBankApi, waitForAppReady, getBanners, getBannerImage, bankApi, bankBinary, pickConfirmAction, collectMessages, DOC_STATE_NAMES, SIGN_MODULE }

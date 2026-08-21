@@ -16,7 +16,7 @@ try {
 
 const express = require('express')
 const cors = require('cors')
-const { getMustRead, confirmMustRead, getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi, getBanners, getBannerImage } = require('./browser')
+const { isPageAlive, getMustRead, confirmMustRead, getAccountsData, getPaymentsData, getTemplatesData, getWhoAmI, getNavDebug, getPaymentsDebug, getApiResponsesDebug, getAccountsDomDebug, submitPayment, getContractorsFromHistory, downloadStatement, getTariffs, transferOwn, getSectionData, DBO_SECTIONS, reconDocuments, reconRest, getDocuments, getAccountNames, documentAction, reconTransferForm, reconDocModel, transferOwnStructured, closeBrowser, getOperations, getMail, getMailItem, markMailRead, getMailCounters, payContragent, payBudget, getDocumentPrint, getRequisites, deleteDocuments, getPartners, getBics, callBankApi, getBanners, getBannerImage } = require('./browser')
 // Подпись живёт отдельно: она идёт через формы банка, тем же путём, что и
 // веб-версия (см. шапку sign.js).
 const { signStart, signMeans, signStatus, signSubmitKey, signSyncToken, signCancel } = require('./sign')
@@ -163,10 +163,15 @@ app.use((req, res, next) => {
 })
 
 app.get('/health', (_, res) => {
+  // Отдельно пароль и отдельно браузер: 21.08.2026 Chromium в контейнере упал,
+  // пароль остался в памяти, и /health бодро отвечал «ok», пока все разделы
+  // отдавали ошибку. Теперь видно и то, и другое — сессия поднимется сама при
+  // первом же запросе, но состояние не приукрашиваем.
   res.json({
     status: hasCreds() ? 'ok' : 'awaiting-login',
     // Пароль не хранится: сервис жив, но до входа владельца в банк не ходит
     dboReady: hasCreds(),
+    browserAlive: isPageAlive(),
     time: new Date().toISOString(),
   })
 })
