@@ -230,6 +230,31 @@ async function doLogin(username, password) {
         await page.goto(API_UI_URL, { waitUntil: 'commit', timeout: 30000 })
         await page.waitForTimeout(5000)
         console.log('[browser] URL после перехода:', page.url())
+
+        // Сессия старого интерфейса для нового не годится: банк на /api-ui/
+        // отправляет обратно на страницу входа, и прежняя сессия при этом
+        // умирает. Так и было 21.08.2026 — вход проходил, а приложение
+        // оставалось без данных.
+        //
+        // Лечится вторым входом ИМЕННО ЗДЕСЬ: на этой странице входа банк
+        // помнит, что мы шли в новый интерфейс, и после неё возвращает туда же
+        // (тот же приём описан в docs/PROJECT-STATE.md — «заходим сразу на
+        // новый интерфейс»). Это ровно одна дополнительная попытка, а не цикл.
+        if (page.url().includes('login.html')) {
+          console.log('[browser] новый интерфейс просит вход — захожу ещё раз, уже из него')
+          try {
+            await page.waitForSelector('#userName', { timeout: 20000, state: 'attached' })
+            try { await page.click('#btn', { timeout: 3000 }) } catch {}
+            await page.fill('#userName', username.toLowerCase(), { timeout: 15000 })
+            await page.fill('#password', password, { timeout: 15000 })
+            await page.click('#submitButton')
+            await page.waitForURL(u => !u.toString().includes('login.html'), { timeout: 30000, waitUntil: 'commit' })
+            await page.waitForTimeout(4000)
+            console.log('[browser] после второго входа URL:', page.url())
+          } catch (e) {
+            console.log('[browser] второй вход не удался:', e.message)
+          }
+        }
       } catch (e) {
         console.log('[browser] переход в новый интерфейс не удался:', e.message)
       }
