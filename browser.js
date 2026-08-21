@@ -185,38 +185,47 @@ async function doLogin(username, password) {
   // а запасной вариант — клик через DOM.
   if (page.url().includes('main.zul')) {
     await page.waitForTimeout(2500)
-    // Диагностика: как на самом деле выглядит ссылка перехода в старом интерфейсе
-    try {
-      const d = await page.evaluate(() => {
-        const txt = (document.body.innerText || '').replace(/\s+/g, ' ')
-        const els = [...document.querySelectorAll('a,button,span,div,td')].filter(e =>
-          /нов\w* интерфейс/i.test(e.textContent || ''))
-        return {
-          естьТекст: /нов\w* интерфейс/i.test(txt),
-          найдено: els.length,
-          образцы: els.slice(0, 3).map(e => ({
-            tag: e.tagName, id: e.id || '', cls: String(e.className).slice(0, 40),
-            href: e.getAttribute('href') || '', onclick: !!e.onclick,
-            текст: (e.textContent || '').trim().slice(0, 40),
-          })),
-        }
-      })
-      console.log('[browser] ссылка «новый интерфейс»:', JSON.stringify(d))
-    } catch {}
-    // Сначала пробуем ссылку, если она есть на странице
-    for (let attempt = 0; attempt < 2 && page.url().includes('main.zul'); attempt++) {
-      try {
-        await page.locator('text=В новый интерфейс').first().click({ timeout: 4000, force: true })
-      } catch {
-        await page.evaluate(() => {
-          const el = [...document.querySelectorAll('*')].find(e => {
-            const own = [...e.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim()
-            return own === 'В новый интерфейс'
-          })
-          el?.click()
-        }).catch(() => {})
+
+    // Ссылка «В новый интерфейс» в старом интерфейсе.
+    //
+    // Искали её по /нов\w* интерфейс/ — и не находили НИКОГДА: `\w` покрывает
+    // только латиницу, а на странице «НОВЫЙ ИНТЕРФЕЙС». Диагностика честно
+    // писала «найдено: 0», хотя ссылка была на виду (21.08.2026). Ищем по
+    // кириллическому диапазону и по обоим видам текста: textContent отдаёт
+    // разметку как есть, innerText — то, что видно после text-transform.
+    const link = await page.evaluate(() => {
+      const re = /нов[а-яё]*\s+интерфейс/i
+      const hits = [...document.querySelectorAll('a,button,span,div,td,li')]
+        .filter((e) => re.test(e.textContent || '') || re.test(e.innerText || ''))
+      // Самый «узкий» элемент: у родителей текст тоже совпадает, но кликать надо по ссылке
+      const el = hits.sort((a, b) => (a.textContent || '').length - (b.textContent || '').length)[0]
+      if (!el) return null
+      const info = {
+        tag: el.tagName, id: el.id || '', cls: String(el.className || '').slice(0, 60),
+        href: el.getAttribute('href') || '', текст: (el.textContent || '').trim().slice(0, 40),
       }
-      await page.waitForTimeout(4000)
+      // Старый интерфейс на ZK: обычного .click() бывает мало, шлём и события
+      try { el.click() } catch {}
+      try {
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+          el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }))
+        }
+      } catch {}
+      return info
+    }).catch(() => null)
+    console.log('[browser] ссылка «новый интерфейс»:', JSON.stringify(link))
+    await page.waitForTimeout(5000)
+
+    // Ссылка оказалась обычной — переходим по её адресу сами
+    if (page.url().includes('main.zul') && link?.href && !link.href.startsWith('#')) {
+      try {
+        const url = new URL(link.href, page.url()).toString()
+        console.log('[browser] перехожу по адресу ссылки:', url)
+        await page.goto(url, { waitUntil: 'commit', timeout: 30000 })
+        await page.waitForTimeout(4000)
+      } catch (e) {
+        console.log('[browser] переход по ссылке не удался:', e.message)
+      }
     }
 
     // Прямой переход на новый интерфейс. Раньше он сбрасывал на форму входа,
